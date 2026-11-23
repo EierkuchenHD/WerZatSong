@@ -125,27 +125,42 @@ function parseFirstLine(line, entriesKey){
 }
 
 // Reads path line by line. Calls onLine(line) for each line and stops early
-// when it returns false.
+// when it returns false. A line is put together once from the pieces of it
+// each chunk holds, so a line hundreds of megabytes long - a file written
+// whole by JSON.stringify - takes no longer than many short ones.
 function forEachLine(path, onLine){
     const fd = openSync(path, 'r')
     try {
         const decoder = new StringDecoder('utf8')
         const buffer = Buffer.alloc(CHUNK_BYTES)
-        let rest = ''
+        let pieces = []
+        const endLine = last => {
+            pieces.push(last)
+            const line = pieces.length === 1 ? pieces[0] : pieces.join('')
+            pieces = []
+            return onLine(line.endsWith('\r') ? line.slice(0, -1) : line)
+        }
+        // false when onLine asked to stop
+        const take = text => {
+            let start = 0
+            for(let end = text.indexOf('\n'); end !== -1; end = text.indexOf('\n', start)){
+                if(endLine(text.slice(start, end)) === false)
+                    return false
+                start = end + 1
+            }
+            if(start < text.length)
+                pieces.push(text.slice(start))
+            return true
+        }
         for(;;){
             const count = readSync(fd, buffer, 0, buffer.length, null)
             if(count === 0)
                 break
-            const lines = (rest + decoder.write(buffer.subarray(0, count))).split('\n')
-            rest = lines.pop()
-            for(const line of lines){
-                if(onLine(line.endsWith('\r') ? line.slice(0, -1) : line) === false)
-                    return
-            }
+            if(!take(decoder.write(buffer.subarray(0, count))))
+                return
         }
-        rest += decoder.end()
-        if(rest !== '')
-            onLine(rest.endsWith('\r') ? rest.slice(0, -1) : rest)
+        if(take(decoder.end()) && pieces.length > 0)
+            endLine('')
     }
     finally {
         closeSync(fd)
