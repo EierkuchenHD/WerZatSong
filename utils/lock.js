@@ -20,6 +20,7 @@ const { execFileSync } = require('node:child_process')
 const crypto = require('node:crypto')
 const { closeSync, openSync, readFileSync, statSync, unlinkSync, writeSync } = require('node:fs')
 const { join } = require('node:path')
+const { t } = require('./i18n')
 
 const LOCK_FILE = join(__dirname, '..', 'werzatsong.lock')
 const TOKEN_ENV = 'WERZATSONG_LOCK_TOKEN'
@@ -75,9 +76,11 @@ function isHeld(lock){
 
 function describe(lock){
     if(!lock)
-        return 'another WerZatSong run'
-    const since = lock.startedAt ? ` since ${new Date(lock.startedAt).toLocaleString()}` : ''
-    return `${lock.owner || 'a WerZatSong run'} (pid ${lock.pid}${since})`
+        return t('lock_another_run')
+    const owner = lock.owner || t('lock_a_run')
+    return lock.startedAt
+        ? t('lock_holder_since', { owner, pid: lock.pid, since: new Date(lock.startedAt).toLocaleString() })
+        : t('lock_holder', { owner, pid: lock.pid })
 }
 
 /*

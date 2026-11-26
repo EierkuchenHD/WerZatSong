@@ -80,6 +80,7 @@ import numpy as np
 import audfprint
 import audfprint_analyze
 import hash_table
+import wzs_i18n
 
 if sys.platform == "win32":
     sys.stdin.reconfigure(encoding="utf-8")
@@ -179,7 +180,8 @@ def match_one(args, analyzer, matcher, report, dbasename, trusted=None,
     analyzer.soundfilecount = 0
     initticks = audfprint.time_clock()
     if args['--verbose']:
-        report([time.ctime() + " Reading hash table " + dbasename])
+        report([time.ctime() + " " + wzs_i18n.t('py_reading_table', 'Reading hash table {file}',
+                                                file=dbasename)])
     # preloaded: a list holding the file's bytes if they were read ahead.
     # Taken out of it here, so that nothing keeps them once the table is
     # loaded.
@@ -190,7 +192,8 @@ def match_one(args, analyzer, matcher, report, dbasename, trusted=None,
     try:
         if analyzer and 'samplerate' in hash_tab.params \
                 and hash_tab.params['samplerate'] != analyzer.target_sr:
-            print("db samplerate overridden to ", analyzer.target_sr)
+            print(wzs_i18n.t('py_samplerate_overridden', 'db samplerate overridden to  {rate}',
+                             rate=analyzer.target_sr))
         filename_iter = audfprint.filename_list_iterator(
                 args['<file>'], args['--wavdir'], args['--wavext'], args['--list'])
         audfprint.do_cmd('match', analyzer, hash_tab, filename_iter,
@@ -199,10 +202,12 @@ def match_one(args, analyzer, matcher, report, dbasename, trusted=None,
                          strip_prefix=args['--wavdir'])
         elapsedtime = audfprint.time_clock() - initticks
         if analyzer and analyzer.soundfiletotaldur > 0.:
-            print("Processed "
-                  + "%d files (%.1f s total dur) in %.1f s sec = %.3f x RT"
-                  % (analyzer.soundfilecount, analyzer.soundfiletotaldur,
-                     elapsedtime, (elapsedtime / analyzer.soundfiletotaldur)))
+            print(wzs_i18n.t('py_processed',
+                             'Processed {files} files ({duration} s total dur) in {elapsed} s sec = {ratio} x RT',
+                             files='%d' % analyzer.soundfilecount,
+                             duration='%.1f' % analyzer.soundfiletotaldur,
+                             elapsed='%.1f' % elapsedtime,
+                             ratio='%.3f' % (elapsedtime / analyzer.soundfiletotaldur)))
     finally:
         # Let go of the table before the next one is loaded into its memory.
         del hash_tab
@@ -217,7 +222,8 @@ def main(argv):
     else:
         args["--maxtimebits"] = hash_table._bitsfor(int(args["--maxtime"]))
     if int(args['--ncores']) > 1:
-        raise ValueError("match_server.py runs one database file at a time; leave --ncores at 1")
+        raise ValueError(wzs_i18n.t('py_one_core',
+                                    'match_server.py runs one database file at a time; leave --ncores at 1'))
     analyzer = audfprint.setup_analyzer(args)
     matcher = audfprint.setup_matcher(args)
     report = audfprint.setup_reporter(args)
@@ -239,7 +245,8 @@ def main(argv):
             trusted = request.get("trusted")
             following = request.get("next")
         except Exception as error:
-            _reply({"dbase": None, "ok": False, "error": "bad request: %s" % error})
+            _reply({"dbase": None, "ok": False,
+                    "error": wzs_i18n.t('py_bad_request', 'bad request: {error}', error=error)})
             continue
         # This file, if it was read ahead; then the read of the next one
         # starts, to run while this one is inflated and matched.

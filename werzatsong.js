@@ -1,7 +1,7 @@
 /*
- * WerZatSong — main orchestrator (performance & observability revision)
+ * WerZatSong: main orchestrator (performance & observability revision)
  * Based on https://github.com/Nel80s/WerZatSong by Nel, with contributions
- * from Numerophobe, AzureBlast, Mystic65 and EierkuchenHD.
+ * from Numerophobe, AzureBlast, Mystic65, EierkuchenHD and some random account.
  *
  * What changed in this revision and why (short version):
  *
@@ -75,10 +75,25 @@
  *  audfprint reports wait until they have finished. See searchOtherModes /
  *  runMatchingStage. SEQUENTIAL_MODES=on in .env runs them one after the
  *  other again.
+ *
+ *  LANGUAGES, DISCORD AND CREDITS
+ *  - --language English / Italiano / Português / Français: every text this
+ *    program and the scripts it starts print or write is in that language
+ *    (utils/i18n.js, localizations/).
+ *  - Text that reaches Discord outside a code block is made harmless first:
+ *    file names go into inline code with their backticks removed, anything
+ *    else has its markdown escaped (utils/discord.js).
+ *  - Each audfprint match gets a credits line: who fingerprinted the pklz it
+ *    came from and who suggested its source, from the credits file that
+ *    comes with WerZatSong plus what the online credits sheet said the last
+ *    time update-credits ran (utils/credits.js). A search never downloads
+ *    the sheet: when some credits are unknown, it says to run that.
+ *    --merge keeps a <shard>.sources.json next to each shard with the pklz
+ *    every track came from, so merged shards keep them.
  */
 
 const dotenv = require('dotenv')
-const { execFile, spawn } = require('node:child_process')
+const { execFile, spawn, spawnSync } = require('node:child_process')
 const crypto = require('node:crypto')
 const { closeSync, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statfsSync, statSync, unlinkSync, writeFileSync } = require('node:fs')
 const { availableParallelism, freemem } = require('node:os')
@@ -87,18 +102,28 @@ const readline = require('node:readline')
 const { promisify } = require('node:util')
 const { hideBin } = require('yargs/helpers')
 const yargs = require('yargs/yargs')
+// First: everything below prints in the language it picks.
+const { supportedLanguageNames, t, unsupportedLanguage, yargsLocale } = require('./utils/i18n')
 const { searchWithAudiotag } = require('./scripts/audiotag')
 const { readObjectHead, readObjectLines } = require('./utils/bigjson')
 const consts = require('./utils/consts')
+const { CREDITS_SHEET, UPDATE_LAUNCHER, prepareCredits, creditLineExample, formatCreditLine, mergeSourcesFile, writeMergeSources } = require('./utils/credits')
+const { findSearchFolder, isFolder, isMerged, listPklz, partsInside, shownFolder } = require('./utils/database')
+const { escapeMarkdown, inlineCode } = require('./utils/discord')
 const { generateUnique, sleep, trimExtension } = require('./utils/helpers')
 const runLock = require('./utils/lock')
 const { empty, exit, info, success, warning } = require('./utils/messages')
 const { checkToolchain, describeToolchain, fingerprintRecipe } = require('./utils/toolchain')
-const { validateAudiotag, validateDuration, validateExtension, validateMusicbrainz, validateWebhook } = require('./utils/validators')
+const { NO_DISCORD_VALUES, RUN_OPTIONS, noDiscordChoice, planSetup, validateAudiotag, validateDuration, validateExtension, validateMusicbrainz, validateWebhook } = require('./utils/validators')
 const postWebhook = require('./utils/webhook')
 const { neutraliseMentions } = postWebhook
 
 require('node:events').setMaxListeners(100) // increase listeners limit
+
+// Said before yargs runs, so it is there even with --help. In English: the
+// language asked for is the one that could not be found.
+if(unsupportedLanguage !== null)
+    warning(t('language_unsupported', { value: unsupportedLanguage, supported: supportedLanguageNames.join(', ') }))
 
 /*
  * ---- audfprint match confidence thresholds --------------------------------
@@ -162,7 +187,7 @@ const DEFAULT_MERGE_MAX_DROPPED = 3        // % of hashes a merged shard may los
 const MAX_FILES_PER_SEARCH = 30            // amount
 const MAX_PREP_CONCURRENCY = 16            // upper bound for parallel ffmpeg/precompute workers
 const MUSICBRAINZ_MIN_SCORE = 60           // percentage
-const PROGRAM_VERSION = 'v1.0.0'
+const PROGRAM_VERSION = 'v3.1.1'
 const RESULTS_FOLDER = join(consts.LOGS_FOLDER, generateUnique())
 const SHAZAM_SLEEP = 1.5                   // seconds
 const WEBHOOK_SLEEP = 2                    // seconds between Discord posts (coarse rate limiting)
@@ -198,28 +223,38 @@ const Mode = {
 
 const execFileP = promisify(execFile)
 const { argv } = yargs(hideBin(process.argv))
-// Program version
-.version(PROGRAM_VERSION)
+// --no-discord and --no-prompt are options of their own, not "--discord" and
+// "--prompt" turned off.
+.parserConfiguration({ 'boolean-negation': false })
+// yargs' own texts (--help headings, its error messages) in the same language
+.locale(yargsLocale)
+// --help and --version
+.help('help', t('opt_help'))
+.version('version', t('opt_version'), PROGRAM_VERSION)
 // Search modes
-.option(Mode.AUDFPRINT, { type: 'boolean', description: 'Enable Audfprint-based matching' })
-.option(Mode.AUDIOTAG, { type: 'boolean', description: 'Enable search using the Audiotag API' })
-.option(Mode.MUSICBRAINZ, { type: 'boolean', description: 'Enable search using MusicBrainz (AcoustID API)' })
-.option(Mode.SHAZAM, { type: 'boolean', description: 'Enable search using Shazam API' })
+.option(Mode.AUDFPRINT, { type: 'boolean', description: t('opt_audfprint') })
+.option(Mode.AUDIOTAG, { type: 'boolean', description: t('opt_audiotag') })
+.option(Mode.MUSICBRAINZ, { type: 'boolean', description: t('opt_musicbrainz') })
+.option(Mode.SHAZAM, { type: 'boolean', description: t('opt_shazam') })
 // Global options
-.option('trim', { type: 'number', description: 'Trim MP3 files to the specified length (in seconds) before processing' })
+.option('language', { type: 'string', description: t('opt_language', { supported: supportedLanguageNames.join(', ') }) })
+.option('trim', { type: 'number', description: t('opt_trim') })
+// Discord and questions
+.option(RUN_OPTIONS.discord, { type: 'string', description: t('opt_no_discord') })
+.option(RUN_OPTIONS.prompt, { type: 'boolean', description: t('opt_no_prompt') })
 // MusicBrainz options
-.option('duration', { type: 'string', description: 'Set the allowed duration range for MusicBrainz searches (format: "min:max")' })
-.option('extension', { type: 'number', description: 'Extend MP3 files by the specified number of seconds before MusicBrainz analysis' })
+.option('duration', { type: 'string', description: t('opt_duration') })
+.option('extension', { type: 'number', description: t('opt_extension') })
 // Audfprint options
-.option('folder', { type: 'string', description: 'Specify the subfolder containing PKLZ files to be used in Audfprint mode' })
-.option('threads', { type: 'number', description: 'Set the number of threads to use for Audfprint processing' })
-.option('shifts', { type: 'number', description: `Query-side audfprint --shifts (1-8). Higher = more robust but slower; default ${DEFAULT_QUERY_SHIFTS}, 2 for a quicker search` })
-.option('shard-timeout', { type: 'number', description: `Minutes one database file may take before its matcher is stopped and the file is reported as failed (default ${DEFAULT_SHARD_TIMEOUT})` })
-.option('resume', { type: 'boolean', description: 'Continue an audfprint search that stopped part-way (crash, cancel): only the database files it had not finished are searched, then the results are reported as usual' })
+.option('folder', { type: 'string', description: t('opt_folder') })
+.option('threads', { type: 'number', description: t('opt_threads') })
+.option('shifts', { type: 'number', description: t('opt_shifts', { default: DEFAULT_QUERY_SHIFTS }) })
+.option('shard-timeout', { type: 'number', description: t('opt_shard_timeout', { default: DEFAULT_SHARD_TIMEOUT }) })
+.option('resume', { type: 'boolean', description: t('opt_resume') })
 // Database maintenance
-.option('merge', { type: 'string', description: 'Merge the PKLZ files in "database/<folder>" into a few large shards (major speedup), then exit. Pass "" for the database root' })
-.option('shard-files', { type: 'number', description: `In --merge mode, how many source PKLZ files go into each merged shard (default ${DEFAULT_MERGE_SHARD_FILES})` })
-.option('max-dropped', { type: 'number', description: `In --merge mode, discard a merged shard that loses more than this % of its hashes to full buckets, keeping its sources as they are (default ${DEFAULT_MERGE_MAX_DROPPED})` })
+.option('merge', { type: 'string', description: t('opt_merge') })
+.option('shard-files', { type: 'number', description: t('opt_shard_files', { default: DEFAULT_MERGE_SHARD_FILES }) })
+.option('max-dropped', { type: 'number', description: t('opt_max_dropped', { default: DEFAULT_MERGE_MAX_DROPPED }) })
 
 /* ---------------------------------------------------------------------------
  * Small generic helpers
@@ -324,18 +359,18 @@ const AFPT_RECORD_BYTES = 8
 function afptProblem(path){
     let size
     try { size = statSync(path).size }
-    catch(error){ return `cannot read it: ${error.message}` }
+    catch(error){ return t('afpt_problem_unreadable', { error: error.message }) }
     if(size < AFPT_MAGIC.length + AFPT_RECORD_BYTES || (size - AFPT_MAGIC.length) % AFPT_RECORD_BYTES !== 0)
-        return `${size} bytes is not a whole number of fingerprint records`
+        return t('afpt_problem_size', { size })
     const head = Buffer.alloc(AFPT_MAGIC.length)
     let fd
     try {
         fd = openSync(path, 'r')
         readSync(fd, head, 0, head.length, 0)
     }
-    catch(error){ return `cannot read it: ${error.message}` }
+    catch(error){ return t('afpt_problem_unreadable', { error: error.message }) }
     finally { if(fd !== undefined) closeSync(fd) }
-    return head.equals(AFPT_MAGIC) ? null : 'it does not start with the audfprint fingerprint header'
+    return head.equals(AFPT_MAGIC) ? null : t('afpt_problem_header')
 }
 
 /* ---------------------------------------------------------------------------
@@ -361,11 +396,14 @@ function setupFolders({ keepSearchState = false } = {}){
         for(const entry of readdirSync(folder))
             rmSync(join(folder, entry), { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
     }
+    // The database folder only when it is WerZatSong's own: one set in
+    // utils/consts.js that is missing may be on a drive that is not
+    // connected, and Audfprint mode says so.
     const foldersToCreate = [
         consts.PRECOMPUTED_FOLDER,
         consts.PROCESSED_FOLDER,
         consts.TEMP_FOLDER,
-        consts.DATABASE_FOLDER,
+        ...(consts.DATABASE_FOLDER === consts.DEFAULT_DATABASE_FOLDER ? [consts.DATABASE_FOLDER] : []),
         consts.INPUT_FOLDER,
         consts.LOGS_FOLDER
     ]
@@ -379,11 +417,39 @@ function setupFolders({ keepSearchState = false } = {}){
         mkdirSync(CACHE_FOLDER, { recursive: true })
 }
 
+// The commands a .env without them (emptied, or written by hand) uses: the
+// ones .env.example has.
+const TOOL_COMMANDS = ['NODE_COMMAND', 'PYTHON_COMMAND', 'FFMPEG_COMMAND']
+
+// .env is read from WerZatSong's folder, where the setup writes it, wherever
+// WerZatSong is started from.
 function fetchEnvironment(){
     if(!existsSync(consts.ENV_FILE))
         copyFileSync(consts.EXAMPLE_ENV_FILE, consts.ENV_FILE)
-    const { parsed } = dotenv.config()
-    return parsed
+    const { parsed } = dotenv.config({ path: consts.ENV_FILE })
+    const env = { ...(parsed || {}) }
+    let defaults = {}
+    try { defaults = dotenv.parse(readFileSync(consts.EXAMPLE_ENV_FILE)) }
+    catch { /* no .env.example: nothing to fill in from */ }
+    const blank = value => String(value ?? '').trim() === ''
+    for(const name of TOOL_COMMANDS){
+        if(!blank(env[name]))
+            continue
+        env[name] = blank(process.env[name]) ? defaults[name] : process.env[name]
+        if(blank(process.env[name]) && !blank(defaults[name]))
+            process.env[name] = defaults[name]
+    }
+    // "python" is what .env.example says, but on macOS and many Linux
+    // systems only "python3" is there.
+    const runs = command => {
+        const result = spawnSync(command, ['--version'], { stdio: 'ignore', timeout: 15 * 1000 })
+        return !result.error && result.status === 0
+    }
+    if(String(env.PYTHON_COMMAND ?? '').trim() === 'python' && !runs('python') && runs('python3')){
+        env.PYTHON_COMMAND = 'python3'
+        process.env.PYTHON_COMMAND = 'python3'
+    }
+    return env
 }
 
 function parseModes(){
@@ -397,7 +463,7 @@ function parseModes(){
     if(argv.shazam)
         modes.push(Mode.SHAZAM)
     if(modes.length === 0)
-        exit(`Please choose at least one search mode (${Object.values(Mode).map(value => `--${value}`).join(', ')})`)
+        exit(t('choose_at_least_one_mode', { modes: Object.values(Mode).map(value => `--${value}`).join(', ') }))
     return modes
 }
 
@@ -408,11 +474,11 @@ function loadSamples(modes){
     const audioFiles = inputEntries.filter(filename => filename.toLowerCase().endsWith('.mp3'))
     const precomputedFiles = inputEntries.filter(filename => filename.toLowerCase().endsWith('.afpt'))
     if(modes.some(mode => mode !== Mode.AUDFPRINT) && audioFiles.length === 0)
-        exit(`You need at least one MP3 file in the "input" folder if you included mode: ${Mode.AUDIOTAG}, ${Mode.MUSICBRAINZ} or ${Mode.SHAZAM}`)
+        exit(t('need_mp3_file_for_modes', { audiotag: Mode.AUDIOTAG, musicbrainz: Mode.MUSICBRAINZ, shazam: Mode.SHAZAM }))
     if(audioFiles.length > MAX_FILES_PER_SEARCH)
-        exit(`Too many MP3 files! Limit per each search is ${MAX_FILES_PER_SEARCH} files, but found ${audioFiles.length} files (MP3)`)
+        exit(t('too_many_mp3_files', { limit: MAX_FILES_PER_SEARCH, count: audioFiles.length }))
     if(modes.includes(Mode.AUDFPRINT) && audioFiles.length === 0 && precomputedFiles.length === 0)
-        exit(`In ${Mode.AUDFPRINT} mode, add at least one MP3 or AFPT file to "input" folder`)
+        exit(t('audfprint_need_mp3_or_afpt', { audfprint: Mode.AUDFPRINT }))
     const mp3Basenames = audioFiles.map(file => trimExtension(file))
     // Compared without case: both kinds end up as precomputed/<name>.afpt, and
     // on NTFS "x.mp3" and "X.afpt" would land on the same file.
@@ -420,11 +486,11 @@ function loadSamples(modes){
     const collisions = mp3Basenames.filter(base => afptBasenames.has(base.toLowerCase()))
     if(collisions.length > 0){
         const collisionFiles = collisions.map(base => `- ${base}.mp3 / ${base}.afpt\n`).join('')
-        exit(`Duplicated filename collisions detected in "input" folder:\n${collisionFiles}`)
+        exit(t('duplicate_filename_collisions', { files: collisionFiles }))
     }
     const totalFiles = audioFiles.length + precomputedFiles.length
     if(modes.includes(Mode.AUDFPRINT) && totalFiles > MAX_FILES_PER_SEARCH)
-        exit(`Too many files! Limit per each ${Mode.AUDFPRINT} search is ${MAX_FILES_PER_SEARCH} files, but found ${totalFiles} files (MP3 + AFPT)`)
+        exit(t('too_many_files_audfprint', { audfprint: Mode.AUDFPRINT, limit: MAX_FILES_PER_SEARCH, count: totalFiles }))
     return { audioFiles, precomputedFiles }
 }
 
@@ -441,10 +507,26 @@ async function trimFile(ffmpegCommand, filename, seconds){
         return true
     }
     catch(error){
-        warning(`Failed to trim "${filename}" - the file will be skipped: ${error.message}`)
+        warning(t('trim_failed', { file: filename, error: error.message }))
         return false
     }
 }
+
+// WZS-EVENT lines: results the bundled audfprint reports on a line of their
+// own when WERZATSONG_EVENTS=1 (libs/audfprint/wzs_i18n.py), because its
+// human messages are in the run's language. Returns the parsed events.
+const EVENT_PREFIX = 'WZS-EVENT '
+function parseEvents(text){
+    const events = []
+    for(const line of String(text).split(/\r?\n/)){
+        if(!line.startsWith(EVENT_PREFIX))
+            continue
+        try { events.push(JSON.parse(line.slice(EVENT_PREFIX.length))) }
+        catch { /* not one of ours after all */ }
+    }
+    return events
+}
+const withEvents = () => ({ env: { ...process.env, WERZATSONG_EVENTS: '1' } })
 
 // Runs audfprint precompute on processed/<filename>. Locates the produced
 // .afpt (audfprint may mirror the input path under --precompdir), moves it to
@@ -461,9 +543,10 @@ async function precomputeFile(pythonCommand, filename, shifts){
             '--precompdir', consts.PRECOMPUTED_FOLDER,
             '--shifts', String(shifts),
             sourcePath
-        ])
-        if(stdout.includes('Zero length analysis')){
-            warning(`File "${filename}" is too short to be precomputed, will be skipped in ${Mode.AUDFPRINT} mode`)
+        ], withEvents())
+        // The English text too, for an audfprint that does not write events.
+        if(parseEvents(stdout).some(event => event.event === 'zero_length') || stdout.includes('Zero length analysis')){
+            warning(t('precompute_too_short', { file: filename, audfprint: Mode.AUDFPRINT }))
             return null
         }
         if(existsSync(targetPath))
@@ -474,11 +557,11 @@ async function precomputeFile(pythonCommand, filename, shifts){
                 copyFileSync(produced, targetPath)
             return targetPath
         }
-        warning(`Precompute reported success for "${filename}" but no "${afptName}" was found - skipping this file`)
+        warning(t('precompute_missing_output', { file: filename, afpt: afptName }))
         return null
     }
     catch(error){
-        warning(`Failed to precompute "${filename}" - the file will be skipped: ${error.message}`)
+        warning(t('precompute_failed', { file: filename, error: error.message }))
         return null
     }
 }
@@ -512,7 +595,7 @@ async function generateFiles(env, trimSeconds, shifts, modes, audioFiles, precom
     if(audioFiles?.length > 0){
         const concurrency = Math.max(1, Math.min(availableParallelism(), MAX_PREP_CONCURRENCY, audioFiles.length))
         if(audioFiles.length > 1)
-            info(`Preparing ${audioFiles.length} input file(s) with up to ${concurrency} parallel worker(s)`)
+            info(t('preparing_input_files', { count: audioFiles.length, concurrency }))
 
         const prepared = await runPool(audioFiles, concurrency, async audioFile => {
             const result = { mp3: null, afpt: null, ok: true }
@@ -548,7 +631,7 @@ async function generateFiles(env, trimSeconds, shifts, modes, audioFiles, precom
                 else {
                     try { copyFileSync(originalPath, processedPath) }
                     catch(error){
-                        warning(`Failed to copy "${audioFile}" - the file will be skipped: ${error.message}`)
+                        warning(t('copy_failed_skip', { file: audioFile, error: error.message }))
                         return false
                     }
                 }
@@ -606,11 +689,11 @@ async function generateFiles(env, trimSeconds, shifts, modes, audioFiles, precom
                 filesToProcess.afpts.push(item.afpt)
         }
         if(cacheHits > 0)
-            success(`Fingerprint cache: reused ${cacheHits} of ${audioFiles.length} query fingerprint(s) from previous runs (skipped ffmpeg + precompute)`)
+            success(t('cache_reused', { hits: cacheHits, total: audioFiles.length }))
         if(skipped > 0)
-            warning(`Skipped ${skipped} input file(s) due to errors above; continuing with the rest`)
+            warning(t('skipped_files_due_to_errors', { count: skipped }))
         if(skipped === audioFiles.length && audioFiles.length > 0 && precomputedFiles?.length === 0)
-            exit('Every input file failed to prepare - nothing to search with')
+            exit(t('all_files_failed_to_prepare'))
     }
 
     if(wantAfpt && precomputedFiles?.length > 0){
@@ -618,7 +701,7 @@ async function generateFiles(env, trimSeconds, shifts, modes, audioFiles, precom
             const source = join(consts.INPUT_FOLDER, precomputedFile)
             const problem = afptProblem(source)
             if(problem){
-                warning(`"${precomputedFile}" is not a usable audfprint fingerprint (${problem}) - the file will be skipped`)
+                warning(t('afpt_unusable', { file: precomputedFile, problem }))
                 continue
             }
             // Always ".afpt" in lower case: audfprint reads a query as a
@@ -638,14 +721,14 @@ async function generateFiles(env, trimSeconds, shifts, modes, audioFiles, precom
 
 // The audfprint log of one query, written in pieces: with every candidate of
 // a large search it can outgrow the longest string Node can hold (about
-// 512 MB). The bytes are those of HUMAN_LOG_LEGEND + buildMatchReport(matches).
-function createMatchLog(basename, matches){
+// 512 MB). The bytes are those of head + buildMatchReport(matches).
+function createMatchLog(basename, matches, head){
     if(!existsSync(RESULTS_FOLDER))
         mkdirSync(RESULTS_FOLDER)
     const resultsFile = join(RESULTS_FOLDER, `${basename}.${Mode.AUDFPRINT}.txt`)
     const fd = openSync(resultsFile, 'w')
     try {
-        let chunk = HUMAN_LOG_LEGEND
+        let chunk = head
         for(let index = 0; index < matches.length; index++){
             chunk += `${index > 0 ? '\n' : ''}${formatMatchEntry(matches[index])}`
             if(chunk.length >= 1 << 20){
@@ -669,38 +752,45 @@ function createResultsLog(basename, mode, content){
     return resultsFile
 }
 
-// `skipMerged`: leave out "<name>__merged" folders (--merge output). They hold
-// copies of shards that are still in place, so a whole-database search that
-// walked into them would search the same material twice and report every
-// match from it twice. Searching one explicitly with --folder still works.
-function fetchFingerprints(targetFolder, { skipMerged = false } = {}){
-    let pklzFiles = []
-    const fetchFilesRecursively = dir => {
-        const files = readdirSync(dir, { withFileTypes: true })
-        for(const file of files){
-            const fullPath = join(dir, file.name)
-            if(file.isDirectory() && skipMerged && file.name.endsWith('__merged'))
-                continue
-            if(file.isDirectory())
-                fetchFilesRecursively(fullPath)
-            else if(file.isFile() && file.name.endsWith('.pklz'))
-                pklzFiles.push(fullPath)
-        }
+// The folder of the database --folder or --merge names (see
+// findSearchFolder in utils/database.js); exits saying why when there is none.
+function searchFolder(folder){
+    const database = consts.DATABASE_FOLDER
+    if(!isFolder(database))
+        exit(t('database_folder_missing', { database }))
+    const found = findSearchFolder(database, folder)
+    const asked = String(folder ?? '').trim()
+    if(found.error === 'outside')
+        exit(t('folder_outside_database', { folder: asked, database }))
+    if(found.error === 'ambiguous'){
+        const shown = found.matches.map(path => `"${shownFolder(database, partsInside(database, path) || [])}"`)
+        exit(t('folder_ambiguous', { folder: asked, folders: shown.join(', '), example: shown[0] }))
     }
-    fetchFilesRecursively(targetFolder)
-    return pklzFiles
+    if(found.error)
+        exit(t('folder_not_found_in_database', { folder: asked, database }))
+    return found
+}
+
+// The PKLZ files of a folder of the database. `skipMerged`: leave out
+// "<name>__merged" folders (--merge output). They hold copies of shards that
+// are still in place, so a whole-database search that walked into them would
+// search the same material twice and report every match from it twice.
+// Searching one explicitly with --folder still works.
+function fetchFingerprints(targetFolder, { skipMerged = false } = {}){
+    const { files, unreadable } = listPklz(targetFolder, { skipMerged })
+    if(unreadable.length > 0)
+        warning(t('folders_unreadable_skipped', { count: unreadable.length, folders: unreadable.slice(0, 5).join(', ') + (unreadable.length > 5 ? ', ...' : '') }))
+    return files
 }
 
 function setupAudfprint(folder){
-    const baseFolder = join(consts.DATABASE_FOLDER, folder ? folder.trim() : '')
-    if(!existsSync(baseFolder))
-        exit(`The specified folder "${folder}" does not exist inside "database/"`)
-    const explicitMerged = Boolean(folder) && folder.trim().replace(/[\\/]+$/, '').endsWith('__merged')
-    const pklzFiles = fetchFingerprints(baseFolder, { skipMerged: !explicitMerged })
+    const found = searchFolder(folder)
+    const explicitMerged = found.parts.length > 0 && isMerged(found.parts[found.parts.length - 1])
+    const pklzFiles = fetchFingerprints(found.path, { skipMerged: !explicitMerged })
     if(pklzFiles.length === 0)
-        exit(`No PKLZ files found in "${baseFolder}"`)
+        exit(t('no_pklz_files_found', { folder: found.path }))
     writeFileSync(consts.PKLZS_FILE, pklzFiles.join('\n'))
-    return pklzFiles.length
+    return { count: pklzFiles.length, path: found.path, shown: shownFolder(consts.DATABASE_FOLDER, found.parts) }
 }
 
 /* ---------------------------------------------------------------------------
@@ -738,7 +828,7 @@ function audfprint(env, threads, { timeoutSeconds, resumeFrom = null } = {}){
             stderrTail.push(text)
             if(stderrTail.length > 40)
                 stderrTail.shift()
-            warning(`[worker stderr] ${text}`)
+            warning(t('worker_stderr', { text }))
         })
         // The other modes may still be
         // searching while this runs (see runMatchingStage). So a failure that
@@ -756,7 +846,7 @@ function audfprint(env, threads, { timeoutSeconds, resumeFrom = null } = {}){
         audfprintProcess.on('error', error => {
             launchFailed = true
             process.removeListener('exit', stopWorker)
-            reject(fatal(`Failed to launch the ${Mode.AUDFPRINT} worker: ${error.message}`))
+            reject(fatal(t('audfprint_launch_failed', { audfprint: Mode.AUDFPRINT, error: error.message })))
         })
         audfprintProcess.on('close', code => {
             process.removeListener('exit', stopWorker)
@@ -766,11 +856,11 @@ function audfprint(env, threads, { timeoutSeconds, resumeFrom = null } = {}){
                 return resolve()
             const tail = stderrTail.join('\n')
             if(tail.includes('MemoryError'))
-                return reject(fatal('The process ran out of memory. Please try reducing the number of threads (or merge/shard your database with --merge) and run it again'))
-            warning(`Mode ${Mode.AUDFPRINT} exited with error code: ${code}`)
+                return reject(fatal(t('out_of_memory')))
+            warning(t('audfprint_exit_error', { audfprint: Mode.AUDFPRINT, code }))
             if(tail !== '')
-                warning(`Last worker stderr output:\n${tail}`)
-            reject(new Error(`audfprint worker exited with code ${code}`))
+                warning(t('last_worker_stderr', { tail }))
+            reject(new Error(t('audfprint_worker_exit_code', { code })))
         })
     })
 }
@@ -802,24 +892,27 @@ function extractPklzName(resultKey){
     return matches ? matches[matches.length - 1] : 'unknown.pklz'
 }
 
-const HUMAN_LOG_LEGEND = [
-    'LEGEND',
-    '  Each entry is two lines:',
-    '    [LABEL] <aligned> aligned / <raw> raw (<cons>%) | x<hits> | #<rank> | <source pklz> | offset <t>s',
-    '    <matched file name> (<matched file path>)',
-    '',
-    '  aligned : time-consistent matching hashes - the primary evidence.',
-    '            audfprint\'s docs: more than 5-6 aligned hashes usually means a true match.',
-    '  raw     : all hashes the query and reference have in common, before time filtering.',
-    '  cons%   : aligned / raw. Random chance stays under ~1%, so even a few percent is meaningful.',
-    '  hits    : how many alignment hits the worker reported for this pair (the old "xN").',
-    '  rank    : candidate position in audfprint\'s raw pre-ranking (diagnostic, not confidence).',
-    '  offset  : query start relative to the reference, in seconds (negative = query starts earlier).',
-    '  LABEL   : VERY STRONG / STRONG / PROBABLE are webhook-worthy; BORDERLINE = review manually;',
-    '            NO MATCH = below every threshold, listed for completeness.',
-    '',
-    ''
-].join('\n')
+// The confidence labels are kept in English inside the program (they are
+// compared and sorted on); this is how one is shown.
+const LABEL_KEYS = {
+    'very strong': 'label_very_strong',
+    'strong': 'label_strong',
+    'probable': 'label_probable',
+    'borderline': 'label_borderline',
+    'no match': 'label_no_match'
+}
+function labelText(label){
+    return t(LABEL_KEYS[label] || LABEL_KEYS['no match'])
+}
+
+// The legend at the top of every result file. With credits, entries have a
+// third line, and the legend says what it means.
+function logLegend(withCredits){
+    const title = t(withCredits ? 'log_legend_title_three' : 'log_legend_title_two')
+    const example = withCredits ? `\n    ${creditLineExample()}` : ''
+    const credits = withCredits ? `\n${t('log_legend_credits')}` : ''
+    return `${title}\n${t('log_legend_format')}${example}\n\n${t('log_legend_body')}${credits}\n\n`
+}
 
 /* ---------------------------------------------------------------------------
  * Discord webhook rendering
@@ -864,7 +957,7 @@ function codeBlockMessage(header, body){
         const kept = []
         let used = 0
         for(const line of lines){
-            const notice = `\n... ${lines.length - kept.length} more line(s), full report attached`
+            const notice = `\n${t('webhook_truncated_lines', { count: lines.length - kept.length })}`
             if(used + line.length + 1 + notice.length > room)
                 break
             kept.push(line)
@@ -874,57 +967,86 @@ function codeBlockMessage(header, body){
             // One line longer than the whole budget - a minified JSON blob
             // does this. Cutting on a line boundary would leave the message
             // with no body at all, so this one gets cut mid-line instead.
-            const notice = `\n... 1 line cut short, full report attached`
+            const notice = `\n${t('webhook_truncated_one_line')}`
             kept.push(lines[0].slice(0, Math.max(0, room - notice.length)))
             text = `${kept[0]}${notice}`
         }
         else
-            text = `${kept.join('\n')}\n... ${lines.length - kept.length} more line(s), full report attached`
+            text = `${kept.join('\n')}\n${t('webhook_truncated_lines', { count: lines.length - kept.length })}`
     }
     return { content: `${header}\n${FENCE}\n${text}\n${FENCE}`, truncated }
 }
 
+// "[mode]: `file name`" - the file name in inline code, its own backticks
+// taken out, so whatever markdown it holds shows as written. The rest of the
+// header is escaped in case a translation brings markdown characters.
+function webhookHeader(mode, fileBasename){
+    const marker = '\u0000FILE\u0000'
+    // A function, so a "$&" or "$'" in the file name stays as written.
+    return escapeMarkdown(t('webhook_header', { mode, file: marker })).replace(marker, () => inlineCode(fileBasename))
+}
+
+// With --no-discord keep-match or keep-nomatch, the only kind of match
+// message still sent: 'match' or 'nomatch'. null: all of them.
+let keptPosts = null
+
 // One way in for every post, so rate limiting, formatting and failure
 // reporting cannot drift between the four modes.
 async function sendMatchWebhook(env, mode, fileBasename, report, fullReportFile = null){
-    const { content, truncated } = codeBlockMessage(`[${mode}]: ${fileBasename}`, report)
+    // A run without Discord messages (--no-discord, or --no-prompt without a
+    // webhook), or with only the "no match found" ones.
+    if(!env.WEBHOOK_URL || keptPosts === 'nomatch'){
+        success(t('match_found', { file: fileBasename, mode }))
+        return false
+    }
+    const { content, truncated } = codeBlockMessage(webhookHeader(mode, fileBasename), report)
     await sleep(WEBHOOK_SLEEP)
     const sent = await postWebhook(env.WEBHOOK_URL, content,
         truncated ? fullReportFile : null)
     if(sent)
-        success(`Possible match found during search against "${fileBasename}" with ${mode} mode. Discord webhook message has been sent`
-            + (truncated ? ' (report too long for one message, full text attached)' : ''))
+        success(t(truncated ? 'match_found_webhook_sent_attached' : 'match_found_webhook_sent', { file: fileBasename, mode }))
     else
         // postWebhook swallows its own errors and returns false, so the
         // try/catch this used to sit in never fired and a failed post was
         // reported as a success.
-        warning(`Match found for "${fileBasename}" with ${mode} mode but the Discord webhook post failed`)
+        warning(t('match_found_webhook_failed', { file: fileBasename, mode }))
     return sent
 }
 
 // note: appended to the line, e.g. that part of the database was not searched.
 async function sendNoMatchWebhook(env, mode, fileBasename, note = ''){
+    if(!env.WEBHOOK_URL || keptPosts === 'match')
+        return false
     await sleep(WEBHOOK_SLEEP)
     const sent = await postWebhook(env.WEBHOOK_URL,
-        `[${mode}]: ${fileBasename} - no match found${note}`)
+        `${webhookHeader(mode, fileBasename)}${escapeMarkdown(`${t('webhook_no_match_suffix')}${note}`)}`)
     if(!sent)
-        warning(`Could not post the "no match" webhook for "${fileBasename}" (${mode} mode)`)
+        warning(t('no_match_webhook_failed', { file: fileBasename, mode }))
     return sent
 }
 
 // Single source of truth for how a match is rendered. The log file and the
 // Discord webhook both use this, so their formatting can never drift apart.
-// Two lines per entry, blank line between entries.
-function formatMatchEntry(match){
-    const label = (match.confidence || 'no match').toUpperCase()
-    const header = `[${label}] ${match.aligned_hashes} aligned / ${match.raw_common_hashes} raw `
-        + `(${match.consistency_pct.toFixed(2)}%) | x${match.hits} | #${match.rank} | `
-        + `${match.source_pklz} | offset ${match.offset_s}s`
-    return `${header}\n${match.matched_basename} (${match.matched_file})\n`
+// Two lines per entry, a third with its credits when there are credits to
+// show (match.credit), blank line between entries. compact: for the Discord
+// message itself.
+function formatMatchEntry(match, { compact = false } = {}){
+    const header = t('format_match_entry', {
+        label: labelText(match.confidence || 'no match').toUpperCase(),
+        aligned: match.aligned_hashes,
+        raw: match.raw_common_hashes,
+        cons: match.consistency_pct.toFixed(2),
+        hits: match.hits,
+        rank: match.rank,
+        pklz: match.source_pklz,
+        offset: match.offset_s
+    })
+    const credits = match.credit !== undefined ? `${formatCreditLine(match.credit, { compact })}\n` : ''
+    return `${header}\n${match.matched_basename} (${match.matched_file})\n${credits}`
 }
 
-function buildMatchReport(matches){
-    return matches.map(formatMatchEntry).join('\n')
+function buildMatchReport(matches, options = {}){
+    return matches.map(match => formatMatchEntry(match, options)).join('\n')
 }
 
 // The candidate the end-of-run summary names: the most confident label first,
@@ -945,10 +1067,11 @@ function pickSummaryMatch(matches){
 // of the database it does not cover.
 async function createAudfprintLogs(env, queryFiles = [], unsearched = { failed: 0, total: 0 }){
     const gapNote = unsearched.failed > 0
-        ? ` (${unsearched.failed} of ${unsearched.total} database file(s) could not be searched)`
+        ? t('unsearched_gap_note', { failed: unsearched.failed, total: unsearched.total })
         : ''
+    const withGapNote = line => line.replace(/\.?$/, end => `${gapNote}${end}`)
     if(!existsSync(consts.RESULTS_FILE)){
-        warning(`No ${Mode.AUDFPRINT} results file was produced - nothing to analyze`)
+        warning(t('no_audfprint_results_file', { audfprint: Mode.AUDFPRINT }))
         return []
     }
     // Read entry by entry: the results of a large search can be bigger than the
@@ -979,14 +1102,37 @@ async function createAudfprintLogs(env, queryFiles = [], unsearched = { failed: 
             rank: parseNumericField(match.rank_position),
             offset_s: parseNumericField(match.match_time),
             source_pklz: extractPklzName(resultKey),
+            // Where that database file is (scripts/audfprint.js). Results
+            // from a checkpoint written before it kept this have only the name.
+            source_pklz_path: typeof match.pklz_path === 'string' ? match.pklz_path : null,
             confidence: classifyMatch(aligned, consistencyPct)
         })
     }
     try { readObjectLines(consts.RESULTS_FILE, addMatch) }
     catch(error){
-        warning(`Could not parse the ${Mode.AUDFPRINT} results file: ${error.message}`)
+        warning(t('could_not_parse_results', { audfprint: Mode.AUDFPRINT, error: error.message }))
         return []
     }
+
+    // Who made each source pklz and who suggested it. null: the credits map
+    // could not be read, and entries keep their two lines.
+    const allMatches = Object.values(matchesByInput).flat()
+    const credits = allMatches.length > 0 ? await prepareCredits() : null
+    // Entries whose credits miss who made the pklz or who suggested it.
+    let missingCredits = 0
+    if(credits){
+        info(t('credits_lookup_start', { count: allMatches.length }))
+        let found = 0
+        for(const match of allMatches){
+            match.credit = credits.lookup({ pklzPath: match.source_pklz_path, pklzName: match.source_pklz, matchedFile: match.matched_file })
+            if(match.credit.found)
+                found += 1
+            if(!match.credit.found || match.credit.possibly || match.credit.fingerprinters.length === 0 || match.credit.suggesters.length === 0)
+                missingCredits += 1
+        }
+        info(t('credits_lookup_done', { found, total: allMatches.length }))
+    }
+    const legend = logLegend(Boolean(credits))
 
     const summary = []
     for(const [inputBasename, matches] of Object.entries(matchesByInput)){
@@ -996,7 +1142,9 @@ async function createAudfprintLogs(env, queryFiles = [], unsearched = { failed: 
 
         // Human-readable log. Same legend + same entry formatting as the
         // webhook below - both go through formatMatchEntry().
-        createMatchLog(inputBasename, matches)
+        // Only the result file says where the credits come from, not Discord.
+        const sheetNote = credits ? `${t('log_credits_sheet_note', { url: CREDITS_SHEET })}\n\n` : ''
+        createMatchLog(inputBasename, matches, `${legend}${sheetNote}`)
 
         summary.push({ query: inputBasename, best: pickSummaryMatch(matches) })
 
@@ -1010,14 +1158,14 @@ async function createAudfprintLogs(env, queryFiles = [], unsearched = { failed: 
             // the entries alone: the legend is the same sixteen lines every
             // time and would crowd out the actual matches inside 2000
             // characters. It stays in the on-disk log either way.
-            writeFileSync(tempFile, `${HUMAN_LOG_LEGEND}${buildMatchReport(webhookMatches)}`, 'utf-8')
+            writeFileSync(tempFile, `${legend}${buildMatchReport(webhookMatches)}`, 'utf-8')
             await sendMatchWebhook(env, Mode.AUDFPRINT, basenameWithFormat,
-                buildMatchReport(webhookMatches), tempFile)
+                buildMatchReport(webhookMatches, { compact: true }), tempFile)
             unlinkSync(tempFile)
         }
         else {
             // Candidates came back, but none cleared the confidence bar.
-            empty(`No match found during search against "${basenameWithFormat}" with ${Mode.AUDFPRINT} mode${gapNote}`)
+            empty(withGapNote(t('no_match_found', { file: basenameWithFormat, mode: Mode.AUDFPRINT })))
             await sendNoMatchWebhook(env, Mode.AUDFPRINT, basenameWithFormat, gapNote)
         }
     }
@@ -1029,9 +1177,12 @@ async function createAudfprintLogs(env, queryFiles = [], unsearched = { failed: 
         if(matchesByInput[inputBasename])
             continue
         const basenameWithFormat = `${inputBasename}.mp3`
-        empty(`No candidates returned for "${basenameWithFormat}" with ${Mode.AUDFPRINT} mode${gapNote}`)
+        empty(withGapNote(t('no_candidates_for_file', { file: basenameWithFormat, mode: Mode.AUDFPRINT })))
         await sendNoMatchWebhook(env, Mode.AUDFPRINT, basenameWithFormat, gapNote)
     }
+    // The sheet is only downloaded when asked: say how, now that it might help.
+    if(missingCredits > 0)
+        info(t('credits_update_hint', { count: missingCredits, launcher: UPDATE_LAUNCHER }))
     return summary
 }
 
@@ -1045,46 +1196,56 @@ async function reportFailedShards(env, pklzCount){
     catch { return 0 }
     if(lines.length === 0)
         return 0
-    warning(`${lines.length} of ${pklzCount} database file(s) could not be searched and were skipped:`)
+    warning(t('failed_shards_header', { count: lines.length, total: pklzCount }))
     for(const line of lines.slice(0, 20)){
         const [path, reason] = line.split('\t')
-        warning(`  ${path} - ${reason || 'unknown error'}`)
+        warning(t('failed_shard_line', { path, reason: reason || t('unknown_error') }))
     }
     if(lines.length > 20)
-        warning(`  ... and ${lines.length - 20} more (full list in ${FAILED_PKLZS_FILE})`)
+        warning(t('failed_shards_more', { count: lines.length - 20, file: FAILED_PKLZS_FILE }))
     // An out-of-memory shard used to stop the whole run with this advice. The
     // run now carries on without it, so the advice has to come from here.
     const outOfMemory = lines.some(line => /MemoryError|Unable to allocate/i.test(line))
     if(outOfMemory)
-        warning('Some of them ran out of memory: run again with fewer --threads (every thread holds one PKLZ file in memory)')
+        warning(t('failed_shards_oom_hint'))
     const listing = lines.map(line => {
         const [path, reason] = line.split('\t')
-        return `${basename(path)} - ${reason || 'unknown error'}`
+        return t('failed_shard_line', { path: basename(path), reason: reason || t('unknown_error') }).trimStart()
     }).join('\n')
-    const { content, truncated } = codeBlockMessage(
-        `[${Mode.AUDFPRINT}]: ${lines.length} database file(s) could not be searched (${outOfMemory ? 'out of memory - try fewer --threads' : 'corrupt?'}) and were skipped`, listing)
-    await sleep(WEBHOOK_SLEEP)
-    if(!await postWebhook(env.WEBHOOK_URL, content, truncated ? FAILED_PKLZS_FILE : null))
-        warning('Could not post the list of unsearchable database files to Discord')
+    const { content, truncated } = codeBlockMessage(escapeMarkdown(t('failed_shards_webhook', {
+        mode: Mode.AUDFPRINT,
+        count: lines.length,
+        reason: t(outOfMemory ? 'failed_shards_reason_oom' : 'failed_shards_reason_corrupt')
+    })), listing)
+    if(env.WEBHOOK_URL){
+        await sleep(WEBHOOK_SLEEP)
+        if(!await postWebhook(env.WEBHOOK_URL, content, truncated ? FAILED_PKLZS_FILE : null))
+            warning(t('failed_shards_webhook_failed'))
+    }
     return lines.length
 }
 
 function printAudfprintSummary(summary){
     if(summary.length === 0)
         return
-    info('---- audfprint summary (best candidate per query, by aligned hashes) ----')
+    info(t('audfprint_summary_header'))
     for(const { query, best } of summary){
         if(!best){
-            empty(`"${query}": no candidates returned`)
+            empty(t('no_candidates_returned', { query }))
             continue
         }
-        const description = `${best.aligned_hashes} aligned (${best.consistency_pct.toFixed(2)}% consistent) -> ${best.matched_basename} [${best.source_pklz}]`
+        const description = t('summary_description', {
+            aligned: best.aligned_hashes,
+            cons: best.consistency_pct.toFixed(2),
+            file: best.matched_basename,
+            pklz: best.source_pklz
+        })
         if(best.confidence && best.confidence !== 'borderline')
-            success(`"${query}": ${best.confidence.toUpperCase()} match - ${description}`)
+            success(t('confident_match', { query, confidence: labelText(best.confidence).toUpperCase(), description }))
         else if(best.confidence === 'borderline')
-            warning(`"${query}": borderline - review manually - ${description}`)
+            warning(t('borderline_match', { query, description }))
         else
-            empty(`"${query}": no confident match (top candidate: ${description})`)
+            empty(t('no_confident_match', { query, description }))
     }
 }
 
@@ -1092,8 +1253,12 @@ function printAudfprintSummary(summary){
  * Database consolidation (--merge)
  * ------------------------------------------------------------------------ */
 
-// Resolves { ok, dropped } - dropped is the % of hashes the merged table lost
-// to full buckets, from audfprint's own "Saved fprints ... (x% dropped)" line.
+// Resolves { ok, dropped, sources } - dropped is the % of hashes the merged
+// table lost to full buckets, from the WZS-EVENT line audfprint writes when it
+// saves (libs/audfprint/hash_table.py; its "Saved fprints ... (x% dropped)"
+// message is in the run's language). An audfprint without events still has
+// its English line read. sources: which tracks each database file brought in
+// (for the credits, utils/credits.js).
 function runMergeShard(env, shardPath, listFile){
     return new Promise(resolve => {
         const { exe, preArgs } = splitCommand(env.PYTHON_COMMAND)
@@ -1104,15 +1269,27 @@ function runMergeShard(env, shardPath, listFile){
             '--dbase', shardPath,
             '--list',
             listFile
-        ], { windowsHide: true })
+        ], { windowsHide: true, ...withEvents() })
         const stderrTail = []
+        const sources = []
         let dropped = null
+        let droppedFromEvent = false
         readline.createInterface({ input: child.stdout }).on('line', line => {
             if(line.trim() === '')
                 return
+            const [event] = parseEvents(line)
+            if(event){
+                if(event.event === 'saved' && typeof event.dropped === 'number' && Number.isFinite(event.dropped)){
+                    dropped = event.dropped
+                    droppedFromEvent = true
+                }
+                else if(event.event === 'merge_source' && typeof event.pklz === 'string' && Array.isArray(event.names))
+                    sources.push({ pklz: event.pklz, names: event.names })
+                return
+            }
             info(`  ${line.trim()}`)
             const saved = line.match(/^Saved fprints .*\(([\d.]+)% dropped\)/)
-            if(saved)
+            if(saved && !droppedFromEvent)
                 dropped = parseFloat(saved[1])
         })
         readline.createInterface({ input: child.stderr }).on('line', line => {
@@ -1123,39 +1300,38 @@ function runMergeShard(env, shardPath, listFile){
                 stderrTail.shift()
         })
         child.on('error', error => {
-            warning(`Failed to launch audfprint for this shard: ${error.message}`)
-            resolve({ ok: false, dropped })
+            warning(t('shard_launch_failed', { error: error.message }))
+            resolve({ ok: false, dropped, sources })
         })
         child.on('close', code => {
             if(code === 0)
-                return resolve({ ok: true, dropped })
-            warning(`Shard merge failed (exit code ${code}). This usually means the source PKLZ files were built with incompatible audfprint parameters (density/samplerate/hashbits) and cannot be merged together`)
+                return resolve({ ok: true, dropped, sources })
+            warning(t('shard_merge_failed', { code }))
             if(stderrTail.length > 0)
-                warning(`Last audfprint output:\n${stderrTail.join('\n')}`)
-            resolve({ ok: false, dropped })
+                warning(t('shard_last_output', { output: stderrTail.join('\n') }))
+            resolve({ ok: false, dropped, sources })
         })
     })
 }
 
 async function mergeDatabase(env, folderArg, shardFilesArg, maxDroppedArg){
     const maxDropped = (!isNaN(maxDroppedArg) && maxDroppedArg >= 0) ? Number(maxDroppedArg) : DEFAULT_MERGE_MAX_DROPPED
-    const folder = (folderArg || '').trim()
-    const baseFolder = join(consts.DATABASE_FOLDER, folder)
-    if(!existsSync(baseFolder))
-        exit(`The specified folder "${folder}" does not exist inside "database/"`)
-    // Exclude previous merge output so re-running does not double-count.
-    const pklzFiles = fetchFingerprints(baseFolder).filter(path => !path.includes('__merged'))
+    const found = searchFolder(folderArg)
+    // Previous merge output is left out, so re-running does not double-count.
+    const pklzFiles = fetchFingerprints(found.path, { skipMerged: true })
     if(pklzFiles.length === 0)
-        exit(`No PKLZ files found in "${baseFolder}" to merge`)
+        exit(t('no_pklz_files_to_merge', { folder: found.path }))
     const perShard = (!isNaN(shardFilesArg) && shardFilesArg > 0) ? Math.floor(shardFilesArg) : DEFAULT_MERGE_SHARD_FILES
-    const mergedName = `${folder || 'all'}__merged`
-    const outDir = join(consts.DATABASE_FOLDER, mergedName)
+    // Next to the folder it merges: "genres/indie-rock" -> "genres/indie-rock__merged".
+    const mergedParts = found.parts.length > 0 ? [...found.parts.slice(0, -1), `${found.parts[found.parts.length - 1]}__merged`] : ['all__merged']
+    const mergedName = mergedParts.join('/')
+    const outDir = join(consts.DATABASE_FOLDER, ...mergedParts)
     if(!existsSync(outDir))
         mkdirSync(outDir, { recursive: true })
 
-    info(`Merging ${pklzFiles.length} PKLZ file(s) into shards of up to ${perShard} source files each`)
-    info('Why this helps: audfprint must fully load (gunzip + unpickle) every database file on every match run, so hundreds of small PKLZ files pay that cost hundreds of times. A few large shards pay it a few times')
-    warning(`Every table has the same fixed capacity, and a full bucket drops hashes at random. A merged shard that loses more than ${maxDropped}% of its hashes is discarded and its sources are left as they are (--max-dropped to change). Files that already hold millions of hashes each gain nothing from merging: lower --shard-files or merge only folders of small files`)
+    info(t('merging_pklz_info', { count: pklzFiles.length, perShard }))
+    info(t('merge_why_it_helps'))
+    warning(t('merge_capacity_warning', { maxDropped }))
 
     const startedAt = Date.now()
     let merged = 0
@@ -1169,28 +1345,41 @@ async function mergeDatabase(env, folderArg, shardFilesArg, maxDroppedArg){
         const shardPath = join(outDir, shardName)
         const listFile = join(consts.TEMP_FOLDER, `merge-shard-${shardIndex}.txt`)
         writeFileSync(listFile, shard.join('\n'))
-        info(`[shard ${shardIndex}/${Math.ceil(pklzFiles.length / perShard)}] merging ${shard.length} file(s) -> ${shardName}`)
-        const { ok, dropped } = await runMergeShard(env, shardPath, listFile)
+        info(t('merging_shard_progress', { index: shardIndex, total: Math.ceil(pklzFiles.length / perShard), count: shard.length, name: shardName }))
+        // One left by an earlier merge would describe another shard.
+        try { unlinkSync(mergeSourcesFile(shardPath)) } catch { /* none */ }
+        const { ok, dropped, sources } = await runMergeShard(env, shardPath, listFile)
         if(!ok)
             failed += 1
         else if(dropped === null || dropped > maxDropped){
             // A lossy shard searches faster and finds less. Not worth keeping.
             rejected += 1
             try { unlinkSync(shardPath) } catch { /* best effort */ }
-            warning(`[shard ${shardIndex}] discarded: it would drop ${dropped === null ? 'an unknown share' : `${dropped}%`} of its hashes (limit ${maxDropped}%)`)
+            warning(t('shard_discarded', { index: shardIndex, share: dropped === null ? t('dropped_unknown_share') : `${dropped}%`, limit: maxDropped }))
         }
-        else
+        else {
             merged += 1
+            // Which pklz each track came from, for the credits. Without it the
+            // shard still works; its matches just get fewer credits.
+            if(sources.length > 0)
+                try { writeMergeSources(shardPath, sources, consts.DATABASE_FOLDER) } catch { /* best effort */ }
+        }
         try { unlinkSync(listFile) } catch { /* best effort */ }
     }
 
-    info(`Merge finished in ${formatSeconds(Date.now() - startedAt)}: ${merged} shard(s) created${rejected > 0 ? `, ${rejected} discarded as too lossy` : ''}${failed > 0 ? `, ${failed} failed` : ''} in "database/${mergedName}"`)
+    info(t('merge_finished', {
+        duration: formatSeconds(Date.now() - startedAt),
+        merged,
+        rejectedSuffix: rejected > 0 ? t('merge_rejected_suffix', { count: rejected }) : '',
+        failedSuffix: failed > 0 ? t('merge_failed_suffix', { count: failed }) : '',
+        name: mergedName
+    }))
     if(merged > 0){
-        success(`Search the merged shards with: --${Mode.AUDFPRINT} --folder "${mergedName}"`)
-        warning(`Whole-database searches skip "*__merged" folders, so they keep searching the originals. The merged copies only replace them when searched explicitly with --folder`)
+        success(t('merge_usage_hint', { audfprint: Mode.AUDFPRINT, name: mergedName }))
+        warning(t('merge_whole_database_note'))
     }
     if(failed > 0 || rejected > 0)
-        warning('Failed or discarded shards were skipped; their source PKLZ files remain untouched and can still be searched unmerged')
+        warning(t('merge_failed_shards_skipped'))
 }
 
 /* ---------------------------------------------------------------------------
@@ -1211,7 +1400,7 @@ async function musicbrainz(env, file, extension, duration){
         const results = []
         for(const outputLog of outputLogs){
             if(outputLog.error)
-                exit(`Detected an invalid AcoustID API key: ${outputLog.data}`)
+                exit(t('invalid_acoustid_key', { data: outputLog.data }))
             for(const result of outputLog.data){
                 if(parseFloat(result.score) >= MUSICBRAINZ_MIN_SCORE)
                     results.push(`[${result.score}% | EXT-${result.extension} | DUR-${result.duration}]: ${consts.ACOUSTID_TRACK_ENDPOINT}/${result.trackId}`)
@@ -1222,12 +1411,12 @@ async function musicbrainz(env, file, extension, duration){
             await sendMatchWebhook(env, Mode.MUSICBRAINZ, fileBasename, results.join('\n'), resultsFile)
         }
         else {
-            empty(`No match found during search against "${fileBasename}" with ${Mode.MUSICBRAINZ} mode`)
+            empty(t('no_match_found', { file: fileBasename, mode: Mode.MUSICBRAINZ }))
             await sendNoMatchWebhook(env, Mode.MUSICBRAINZ, fileBasename)
         }
     }
     catch(error){
-        warning(`Failed to run ${Mode.MUSICBRAINZ} search against "${fileBasename}": ${error.message}`)
+        warning(t('search_failed', { mode: Mode.MUSICBRAINZ, file: fileBasename, error: error.message }))
     }
 }
 
@@ -1245,14 +1434,14 @@ async function audiotag(env, file){
         else if(response.error)
             // A failed lookup is not the same as a clean "nothing matched", so
             // it does not get a no-match webhook.
-            warning(`Failed to run ${Mode.AUDIOTAG} search against "${fileBasename}": ${response.error}`)
+            warning(t('search_failed', { mode: Mode.AUDIOTAG, file: fileBasename, error: response.error }))
         else {
-            empty(`No match found during search against "${fileBasename}" with ${Mode.AUDIOTAG} mode`)
+            empty(t('no_match_found', { file: fileBasename, mode: Mode.AUDIOTAG }))
             await sendNoMatchWebhook(env, Mode.AUDIOTAG, fileBasename)
         }
     }
     catch(error){
-        warning(`Failed to run ${Mode.AUDIOTAG} search against "${fileBasename}": ${error.message}`)
+        warning(t('search_failed', { mode: Mode.AUDIOTAG, file: fileBasename, error: error.message }))
     }
 }
 
@@ -1267,12 +1456,12 @@ async function shazam(env, file){
             await sendMatchWebhook(env, Mode.SHAZAM, fileBasename, result, resultsFile)
         }
         else {
-            empty(`No match found during search against "${fileBasename}" with ${Mode.SHAZAM} mode`)
+            empty(t('no_match_found', { file: fileBasename, mode: Mode.SHAZAM }))
             await sendNoMatchWebhook(env, Mode.SHAZAM, fileBasename)
         }
     }
     catch(error){
-        warning(`Failed to run ${Mode.SHAZAM} search against "${fileBasename}": ${error.message}`)
+        warning(t('search_failed', { mode: Mode.SHAZAM, file: fileBasename, error: error.message }))
     }
 }
 
@@ -1291,11 +1480,11 @@ async function checkTools(env, needs){
         python: splitCommand(env.PYTHON_COMMAND),
         ffmpeg: splitCommand(env.FFMPEG_COMMAND)
     }, needs)
-    info(`Tools: ${describeToolchain(result)}`)
+    info(t('tools_line', { tools: describeToolchain(result) }))
     for(const note of result.notes)
         warning(note)
     if(result.problems.length > 0)
-        exit(`Cannot run with the tools found:\n${result.problems.map(problem => `  - ${problem}`).join('\n')}`)
+        exit(t('tools_problems', { problems: result.problems.map(problem => `  - ${problem}`).join('\n') }))
     return result
 }
 
@@ -1308,7 +1497,7 @@ function fitThreadsToMemory(threads){
     if(fits >= threads)
         return threads
     const reduced = Math.max(1, fits)
-    warning(`Only ${gigabytes(free)} GB of memory is free and each thread needs up to ${gigabytes(MATCHER_PEAK_BYTES)} GB while it loads a database file, so ${reduced} thread(s) are used instead of ${threads}`)
+    warning(t('threads_reduced_memory', { free: gigabytes(free), perThread: gigabytes(MATCHER_PEAK_BYTES), reduced, threads }))
     return reduced
 }
 
@@ -1328,7 +1517,7 @@ function checkDiskSpace(){
     }
     for(const [drive, free] of drives){
         if(free !== null && free < DISK_WARN_BYTES)
-            warning(`Only ${gigabytes(free)} GB is free on ${drive} - temp/, logs/ or the fingerprint cache may fail to save, and with them this run's results`)
+            warning(t('low_disk_space', { free: gigabytes(free), drive }))
     }
 }
 
@@ -1384,7 +1573,7 @@ function noteUnfinishedSearch(){
     if(!state || state.finished)
         return
     const done = readCheckpointHead()?.done?.length || 0
-    info(`The previous search (started ${state.startedAt}) stopped after ${done} of ${state.total} database files; this run starts over (werzatsong.js --resume would have continued it)`)
+    info(t('previous_search_unfinished', { startedAt: state.startedAt, done, total: state.total }))
 }
 
 // The matching stage and its reports; shared by normal runs and --resume.
@@ -1401,18 +1590,18 @@ async function runMatchingStage(env, { threads, queries, total, searching, resum
         // When the matching stage came second, the other modes had finished
         // and posted before it could fail. They still do.
         if(otherModes && !otherModes.finished){
-            warning(`The ${Mode.AUDFPRINT} search failed; the ${otherModes.label} search finishes first`)
+            warning(t('audfprint_failed_other_modes_finish', { audfprint: Mode.AUDFPRINT, modes: otherModes.label }))
             await otherModes.done
         }
         if(error.fatal)
             exit(error.message)
         throw error
     }
-    info(`Search completed with ${Mode.AUDFPRINT} mode in ${formatSeconds(Date.now() - matchStartedAt)} (${(searching / Math.max(1, (Date.now() - matchStartedAt) / 1000)).toFixed(2)} pklz/sec), now analyzing results... Please wait and do not close the program`)
+    info(t('audfprint_search_completed', { audfprint: Mode.AUDFPRINT, duration: formatSeconds(Date.now() - matchStartedAt), rate: (searching / Math.max(1, (Date.now() - matchStartedAt) / 1000)).toFixed(2) }))
     // The other modes' posts come before the audfprint reports, as they did
     // when the other modes ran first.
     if(otherModes && !otherModes.finished){
-        info(`Waiting for the ${otherModes.label} search to finish; the ${Mode.AUDFPRINT} results are reported after it`)
+        info(t('waiting_other_modes', { modes: otherModes.label, audfprint: Mode.AUDFPRINT }))
         await otherModes.done
     }
     // Unsearched database files are reported first: a "no match found"
@@ -1429,32 +1618,32 @@ async function runMatchingStage(env, { threads, queries, total, searching, resum
 async function resumeSearch(env){
     const state = readJsonFile(RUN_STATE_FILE)
     if(!state || state.version !== RUN_STATE_VERSION)
-        exit('Nothing to resume: temp/ holds no stopped audfprint search. A run that stopped before its matching stage, or one that a newer run replaced, has to be started again')
+        exit(t('nothing_to_resume'))
     if(state.finished)
-        exit(`Nothing to resume: the last search (started ${state.startedAt}) finished`)
+        exit(t('nothing_to_resume_finished', { startedAt: state.startedAt }))
     for(const name of ['folder', 'shifts', 'trim'].filter(option => argv[option] !== undefined))
-        warning(`--${name} is ignored with --resume: the stopped search's own setting is used`)
+        warning(t('resume_option_ignored', { name }))
     if(['audiotag', 'musicbrainz', 'shazam'].some(mode => argv[mode]))
-        info('Only the audfprint search is resumed; the other modes are not run again')
+        info(t('resume_only_audfprint'))
     // The other modes search while the matching stage runs, so a run stopped
     // part-way can have left some files unsearched by them.
     const unsearched = readJsonFile(OTHER_MODES_FILE)
     if(Array.isArray(unsearched?.pending) && unsearched.pending.length > 0)
-        warning(`When the search stopped, ${unsearched.modes} had not searched ${unsearched.pending.length} file(s): ${unsearched.pending.join(', ')}. --resume does not search them with those modes; start a new run for that`)
+        warning(t('resume_other_modes_unsearched', { modes: unsearched.modes, count: unsearched.pending.length, files: unsearched.pending.join(', ') }))
     // The very fingerprints the stopped search used, unchanged.
     for(const query of state.queries){
         if(!existsSync(query.path) || hashFileSync(query.path) !== query.sha1)
-            exit(`Cannot resume: the query fingerprint "${basename(query.path)}" is missing or has changed since the search started`)
+            exit(t('resume_query_changed', { file: basename(query.path) }))
     }
     let all
     try { all = readFileSync(ALL_PKLZS_FILE, 'utf-8').split('\n').map(line => line.trim()).filter(Boolean) }
-    catch { exit('Cannot resume: the stopped search\'s list of database files (temp/_pklzs_all.txt) is gone') }
+    catch { exit(t('resume_list_gone')) }
     const checkpoint = existsSync(CHECKPOINT_FILE) ? readCheckpointHead() : null
     if(existsSync(CHECKPOINT_FILE) && !checkpoint)
-        exit('Cannot resume: temp/_checkpoint.json is unreadable')
+        exit(t('resume_checkpoint_unreadable'))
     const done = new Set((checkpoint?.done || []).map(entry => entry.fingerprint))
     const remaining = all.filter(path => !done.has(path))
-    info(`Resuming the search started ${state.startedAt} in "database/${state.folder}" (query --shifts ${state.shifts}): ${done.size} of ${all.length} database files were finished, ${remaining.length} left`)
+    info(t('resuming_search', { startedAt: state.startedAt, folder: state.folder, shifts: state.shifts, done: done.size, total: all.length, remaining: remaining.length }))
 
     // What the files being matched at the stop left behind.
     for(const entry of readdirSync(consts.TEMP_FOLDER)){
@@ -1468,7 +1657,7 @@ async function resumeSearch(env){
     let threads = Math.min(consts.MAX_CORES_ALLOWED, (!isNaN(argv.threads) && argv.threads > 0) ? argv.threads : availableParallelism())
     threads = fitThreadsToMemory(threads)
     checkDiskSpace()
-    info(`Using ${threads} concurrent threads for processing`)
+    info(t('using_threads', { count: threads }))
     await runMatchingStage(env, {
         threads,
         queries: state.queries.map(query => query.path),
@@ -1480,9 +1669,9 @@ async function resumeSearch(env){
 
 function reportWhereResultsAre(){
     if(existsSync(RESULTS_FOLDER) && readdirSync(RESULTS_FOLDER).some(file => extname(file) === '.txt'))
-        info(`Execution complete! Check logs results in: ${RESULTS_FOLDER}`)
+        info(t('execution_complete_with_results', { folder: RESULTS_FOLDER }))
     else
-        info('Execution complete! Unfortunately, no results were found')
+        info(t('execution_complete_no_results'))
 }
 
 /* ---------------------------------------------------------------------------
@@ -1492,17 +1681,17 @@ function reportWhereResultsAre(){
 async function init(){
     let { duration, extension, folder, merge, shifts, threads, trim } = argv
     const resuming = Boolean(argv.resume) && merge === undefined
-    info(`Welcome to WerZatSong ${PROGRAM_VERSION}! - Developed by Nel with contributions from Numerophobe, AzureBlast, Mystic65 and EierkuchenHD`)
+    info(t('welcome_message', { version: PROGRAM_VERSION }))
     // Before anything touches temp/, precomputed/ or processed/: setupFolders()
     // wipes them, which destroys a run already in progress.
     const lock = runLock.acquire(merge !== undefined ? 'werzatsong.js --merge' : (resuming ? 'werzatsong.js --resume' : 'werzatsong.js'))
     if(!lock.acquired){
-        console.error(`[BUSY]: ${runLock.describe(lock.holder)} is already using this WerZatSong install. Try again when it has finished.`)
+        console.error(`[${t('tag_busy')}]: ${t('busy_message', { holder: runLock.describe(lock.holder) })}`)
         process.exit(BUSY_EXIT_CODE)
     }
     process.on('exit', lock.release)
     if(lock.inherited)
-        info('Running under the run lock held by the program that started this run')
+        info(t('running_under_inherited_lock'))
     if(!resuming && merge === undefined)
         noteUnfinishedSearch()
     setupFolders({ keepSearchState: resuming })
@@ -1515,29 +1704,49 @@ async function init(){
         return
     }
 
-    const validatedWebhook = await validateWebhook(env.WEBHOOK_URL)
-    if(validatedWebhook){
-        env.WEBHOOK_URL = validatedWebhook
-        success('Discord webhook has been set successfully in .env file')
+    // --resume only goes on with Audfprint. Only what this run needs is asked
+    // for, and nothing with --no-prompt.
+    let modes = resuming ? [Mode.AUDFPRINT] : parseModes()
+    const noDiscord = noDiscordChoice(argv[RUN_OPTIONS.discord])
+    if(noDiscord === undefined)
+        exit(t('no_discord_unknown_value', { value: String(argv[RUN_OPTIONS.discord]).trim(), values: NO_DISCORD_VALUES.join(', ') }))
+    const setup = planSetup({ env, modes, noDiscord, noPrompt: Boolean(argv[RUN_OPTIONS.prompt]) })
+    for(const mode of setup.skippedModes)
+        warning(t(`${mode}_skipped_no_key`, { mode }))
+    modes = modes.filter(mode => !setup.skippedModes.includes(mode))
+    if(modes.length === 0)
+        exit(t('no_modes_left'))
+    if(setup.discordOff){
+        env.WEBHOOK_URL = ''
+        info(t(setup.discordOff === 'option' ? 'discord_off' : 'discord_skipped'))
+    }
+    else {
+        const validatedWebhook = await validateWebhook(env.WEBHOOK_URL)
+        if(validatedWebhook){
+            env.WEBHOOK_URL = validatedWebhook
+            success(t('webhook_set_successfully'))
+        }
+        keptPosts = setup.keptPosts
+        if(keptPosts)
+            info(t(`discord_keep_${keptPosts}`))
     }
     if(resuming){
         await resumeSearch(env)
         reportWhereResultsAre()
         return
     }
-    const modes = parseModes()
     if(modes.includes(Mode.AUDIOTAG)){
         const validatedAudiotag = await validateAudiotag(env.AUDIOTAG_KEY)
         if(validatedAudiotag){
             env.AUDIOTAG_KEY = validatedAudiotag
-            success('Audiotag API key has been set successfully in .env file')
+            success(t('audiotag_key_set_successfully'))
         }
     }
     if(modes.includes(Mode.MUSICBRAINZ)){
         const validatedMusicbrainz = await validateMusicbrainz(env.ACOUSTID_KEY)
         if(validatedMusicbrainz){
             env.ACOUSTID_KEY = validatedMusicbrainz
-            success('AcoustID API key has been set successfully in .env file')
+            success(t('acoustid_key_set_successfully'))
         }
         extension = validateExtension(extension)
         duration = validateDuration(duration)
@@ -1547,15 +1756,17 @@ async function init(){
     shifts = (!isNaN(shifts) && shifts >= 1 && shifts <= 8) ? Math.floor(shifts) : DEFAULT_QUERY_SHIFTS
 
     let pklzCount = 0
+    let searched = null
     if(modes.includes(Mode.AUDFPRINT)){
         threads = Math.min(consts.MAX_CORES_ALLOWED, (!isNaN(threads) && threads > 0) ? threads : availableParallelism())
-        pklzCount = setupAudfprint(folder)
+        searched = setupAudfprint(folder)
+        pklzCount = searched.count
         // --merge is only suggested, not urged: many PKLZ files already hold
         // 7-10 million hashes and drop ~1% of them to full buckets on their
         // own; merging 64 of them into one table of the same size would throw
         // most hashes away, and --merge refuses shards that lose too much.
         if(pklzCount > 50)
-            info(`Searching ${pklzCount} separate PKLZ files; each is loaded once per run. --merge can combine small ones (it skips shards that would drop more than ${DEFAULT_MERGE_MAX_DROPPED}% of their hashes)`)
+            info(t('many_pklz_files_hint', { count: pklzCount }))
     }
 
     const { audioFiles, precomputedFiles } = loadSamples(modes)
@@ -1575,18 +1786,18 @@ async function init(){
     const prepStartedAt = Date.now()
     const { afpts, mp3s } = await generateFiles(env, trim, shifts, modes, audioFiles, precomputedFiles, recipe)
     if(audioFiles.length > 0)
-        info(`Input preparation took ${formatSeconds(Date.now() - prepStartedAt)}`)
+        info(t('input_preparation_took', { duration: formatSeconds(Date.now() - prepStartedAt) }))
 
     let otherModes = null
     if(modes.some(mode => mode !== Mode.AUDFPRINT)){
         const mp3Modes = modes.filter(mode => mode !== Mode.AUDFPRINT)
-        info(`Searching ${mp3s.length} MP3 files with mode${mp3Modes.length > 1 ? 's' : ''}: ${mp3Modes.join(', ')}`)
+        info(t(mp3Modes.length > 1 ? 'searching_files_with_modes' : 'searching_files_with_mode', { count: mp3s.length, modes: mp3Modes.join(', ') }))
         if(trim > 0)
-            info(`MP3 files will be shortened to ${trim} seconds for all search modes`)
+            info(t('mp3_files_trim_notice', { trim }))
         if(modes.includes(Mode.MUSICBRAINZ)){
             const [minDuration, maxDuration] = duration.split(':').map(Number)
-            info(`Mode ${Mode.MUSICBRAINZ} will be searching for tracks with duration ranges between ${minDuration} and ${maxDuration} seconds`)
-            info(`Mode ${Mode.MUSICBRAINZ} will be extending tracks between 0 and ${extension} seconds during the searches`)
+            info(t('musicbrainz_duration_range_notice', { musicbrainz: Mode.MUSICBRAINZ, min: minDuration, max: maxDuration }))
+            info(t('musicbrainz_extension_notice', { musicbrainz: Mode.MUSICBRAINZ, extension }))
         }
         // The other modes run alongside the matching stage: see the top of the file.
         // sideBySide: this loop runs while the matching stage does, and
@@ -1604,15 +1815,15 @@ async function init(){
             for(const mp3 of mp3s){
                 const basenameMp3 = basename(mp3)
                 if(modes.includes(Mode.MUSICBRAINZ)){
-                    info(`Searching "${basenameMp3}" with ${Mode.MUSICBRAINZ} mode`)
+                    info(t('searching_file_with_mode', { file: basenameMp3, mode: Mode.MUSICBRAINZ }))
                     await musicbrainz(env, mp3, extension, duration)
                 }
                 if(modes.includes(Mode.AUDIOTAG)){
-                    info(`Searching "${basenameMp3}" with ${Mode.AUDIOTAG} mode`)
+                    info(t('searching_file_with_mode', { file: basenameMp3, mode: Mode.AUDIOTAG }))
                     await audiotag(env, mp3)
                 }
                 if(modes.includes(Mode.SHAZAM)){
-                    info(`Searching "${basenameMp3}" with ${Mode.SHAZAM} mode`)
+                    info(t('searching_file_with_mode', { file: basenameMp3, mode: Mode.SHAZAM }))
                     await shazam(env, mp3)
                 }
                 pending.shift()
@@ -1622,11 +1833,11 @@ async function init(){
         const sequential = ['on', '1', 'yes', 'true'].includes(String(env.SEQUENTIAL_MODES || '').trim().toLowerCase())
         const reservedName = mp3s.some(mp3 => RESERVED_TEMP_NAMES.has(trimExtension(basename(mp3)).toLowerCase()))
         if(modes.includes(Mode.AUDFPRINT) && afpts.length > 0 && mp3s.length > 0 && !sequential && !reservedName){
-            info(`The ${mp3Modes.join(', ')} search runs while ${Mode.AUDFPRINT} searches the database; the ${Mode.AUDFPRINT} results are reported after both have finished`)
+            info(t('other_modes_side_by_side', { modes: mp3Modes.join(', '), audfprint: Mode.AUDFPRINT }))
             otherModes = { label: mp3Modes.join(', '), finished: false, done: null }
             // Never rejects: the matching stage awaits it at its own pace.
             otherModes.done = searchOtherModes(true)
-                .catch(error => warning(`The ${otherModes.label} search stopped unexpectedly: ${error?.stack || error}`))
+                .catch(error => warning(t('other_modes_stopped_unexpectedly', { modes: otherModes.label, error: error?.stack || error })))
                 .then(() => { otherModes.finished = true })
         }
         else
@@ -1635,11 +1846,11 @@ async function init(){
 
     if(modes.includes(Mode.AUDFPRINT)){
         if(afpts.length === 0)
-            exit(`In ${Mode.AUDFPRINT} mode, at least one valid precomputed AFPT file is required`)
+            exit(t('audfprint_need_afpt', { audfprint: Mode.AUDFPRINT }))
         writeFileSync(consts.AFPTS_FILE, afpts.join('\n'))
-        info(`Searching ${afpts.length} precomputed audio files with ${Mode.AUDFPRINT} mode (query --shifts ${shifts})`)
-        info(`Loaded a total of ${pklzCount} PKLZ files from the folder "database/${folder || ''}"`)
-        info(`Using ${threads} concurrent threads for processing`)
+        info(t('searching_precomputed_files', { count: afpts.length, audfprint: Mode.AUDFPRINT, shifts }))
+        info(t('loaded_pklz_total', { count: pklzCount, folder: searched.path }))
+        info(t('using_threads', { count: threads }))
         // Note: parallelism lives in the worker (one process per thread). If
         // you also raise audfprint's own --ncores inside the worker you will
         // run threads x ncores processes and thrash CPU/RAM - keep one level.
@@ -1648,7 +1859,7 @@ async function init(){
         saveRunState({
             version: RUN_STATE_VERSION,
             startedAt: new Date().toLocaleString('sv-SE'),
-            folder: folder ? folder.trim() : '',
+            folder: searched.shown,
             shifts,
             total: pklzCount,
             queries: afpts.map(path => ({ path, sha1: hashFileSync(path) })),
@@ -1663,6 +1874,6 @@ async function init(){
 init().catch(error => {
     // Without this an unexpected throw is an unhandled rejection: Node prints a
     // bare stack and exits, and nothing says which phase failed.
-    console.error(`[ERROR]: WerZatSong stopped unexpectedly: ${error?.stack || error}`)
+    console.error(`[${t('tag_error')}]: ${t('stopped_unexpectedly', { error: error?.stack || error })}`)
     process.exit(1)
 })

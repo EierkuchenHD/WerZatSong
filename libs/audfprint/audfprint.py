@@ -27,6 +27,8 @@ import audfprint_analyze
 import audfprint_match
 # My hash_table implementation
 import hash_table
+# LOCAL ADDITION: messages in WerZatSong's language, see wzs_i18n.py
+import wzs_i18n
 
 if sys.version_info[0] >= 3:
     # Python 3 specific definitions
@@ -94,7 +96,9 @@ def file_precompute_peaks_or_hashes(analyzer, filename, precompdir,
             precompext = audfprint_analyze.PRECOMPPKEXT
     opfname = os.path.join(precompdir, os.path.basename(root) + precompext)
     if skip_existing and os.path.isfile(opfname):
-        return ["file " + opfname + " exists (and --skip-existing); skipping"]
+        return [wzs_i18n.t('py_precompute_exists',
+                           'file {file} exists (and --skip-existing); skipping',
+                           file=opfname)]
     else:
         # Do the analysis
         if hashes_not_peaks:
@@ -107,21 +111,31 @@ def file_precompute_peaks_or_hashes(analyzer, filename, precompdir,
             output = analyzer.wavfile2peaks(filename)
         # save the hashes or peaks file
         if len(output) == 0:
-            message = "Zero length analysis for " + filename + " -- not saving."
+            message = wzs_i18n.t('py_zero_length',
+                                 'Zero length analysis for {file} -- not saving.',
+                                 file=filename)
+            # LOCAL MODIFICATION: werzatsong.js skips such a query on this
+            # line, not on the wording above.
+            event = wzs_i18n.event_line('zero_length', file=filename)
+            if event is not None:
+                return [message, event]
         else:
             # Make sure the output directory exists
             ensure_dir(os.path.split(opfname)[0])
             # Write the file
             saver(opfname, output)
-            message = ("wrote " + opfname + " ( %d %s, %.3f sec)"
-                       % (len(output), type, analyzer.soundfiledur))
+            message = wzs_i18n.t('py_precompute_wrote',
+                                 'wrote {file} ( {count} {type}, {seconds} sec)',
+                                 file=opfname, count=len(output), type=type,
+                                 seconds='%.3f' % analyzer.soundfiledur)
         return [message]
 
 
 def file_precompute(analyzer, filename, precompdir, type='peaks', skip_existing=False, strip_prefix=None):
     """ Perform precompute action for one file, return list
         of message strings """
-    print(time.ctime(), "precomputing", type, "for", filename, "...")
+    print(time.ctime(), wzs_i18n.t('py_precomputing', 'precomputing {type} for {file} ...',
+                                   type=type, file=filename))
     hashes_not_peaks = (type == 'hashes')
     return file_precompute_peaks_or_hashes(analyzer, filename, precompdir,
                                            hashes_not_peaks=hashes_not_peaks,
@@ -160,6 +174,11 @@ def do_cmd(cmd, analyzer, hash_tab, filename_iter, matcher, outdir, type, report
                 # "newmerge" fails to setup the samplerate param
                 hash_tab.params["samplerate"] = hash_tab2.params["samplerate"]
             hash_tab.merge(hash_tab2)
+            # LOCAL MODIFICATION: werzatsong.js --merge keeps which database
+            # file each track came from, so the merged copy's matches still
+            # get the credits of the pklz they came from.
+            wzs_i18n.emit('merge_source', pklz=filename,
+                          names=[name for name in hash_tab2.names if name is not None])
 
     elif cmd == 'precompute':
         # just precompute fingerprints, single core
@@ -177,15 +196,15 @@ def do_cmd(cmd, analyzer, hash_tab, filename_iter, matcher, outdir, type, report
         tothashes = 0
         ix = 0
         for filename in filename_iter:
-            report([time.ctime() + " ingesting #" + str(ix) + ": "
-                    + filename + " ..."])
+            report([time.ctime() + " " + wzs_i18n.t('py_ingesting', 'ingesting #{index}: {file} ...',
+                                                    index=ix, file=filename)])
             dur, nhash = analyzer.ingest(hash_tab, filename)
             tothashes += nhash
             ix += 1
 
-        report(["Added " + str(tothashes) + " hashes "
-                + "(%.1f" % (tothashes / float(analyzer.soundfiletotaldur))
-                + " hashes/sec)"])
+        report([wzs_i18n.t('py_added_hashes', 'Added {count} hashes ({rate} hashes/sec)',
+                           count=tothashes,
+                           rate='%.1f' % (tothashes / float(analyzer.soundfiletotaldur)))])
     elif cmd == 'remove':
         # Removing files from hash table.
         for filename in filename_iter:
@@ -195,7 +214,8 @@ def do_cmd(cmd, analyzer, hash_tab, filename_iter, matcher, outdir, type, report
         hash_tab.list(lambda x: report([x]))
 
     else:
-        raise ValueError("unrecognized command: " + cmd)
+        raise ValueError(wzs_i18n.t('py_unrecognized_command', 'unrecognized command: {command}',
+                                    command=cmd))
 
 
 def multiproc_add(analyzer, hash_tab, filename_iter, report, ncores):
@@ -228,9 +248,9 @@ def multiproc_add(analyzer, hash_tab, filename_iter, report, ncores):
     for core in range(ncores):
         # thread passes back serialized hash table structure
         hash_tabx = rx[core].recv()
-        report(["hash_table " + str(core) + " has "
-                + str(len(hash_tabx.names))
-                + " files " + str(sum(hash_tabx.counts)) + " hashes"])
+        report([wzs_i18n.t('py_core_table', 'hash_table {core} has {files} files {hashes} hashes',
+                           core=core, files=len(hash_tabx.names),
+                           hashes=sum(hash_tabx.counts))])
         # merge in all the new items, hash entries
         hash_tab.merge(hash_tabx)
         # finish that thread...
@@ -275,7 +295,8 @@ def do_cmd_multiproc(cmd, analyzer, hash_tab, filename_iter, matcher,
 
     else:
         # This is not a multiproc command
-        raise ValueError("unrecognized multiproc command: " + cmd)
+        raise ValueError(wzs_i18n.t('py_unrecognized_multiproc_command',
+                                    'unrecognized multiproc command: {command}', command=cmd))
 
 
 # Command to separate out setting of analyzer parameters
@@ -403,7 +424,7 @@ def main(argv):
                for cmdname in poss_cmds
                if args[cmdname]]
     if len(cmdlist) != 1:
-        raise ValueError("must specify exactly one command")
+        raise ValueError(wzs_i18n.t('py_one_command', 'must specify exactly one command'))
     # The actual command as a str
     cmd = cmdlist[0]
 
@@ -432,7 +453,8 @@ def main(argv):
         # Check we have one
         dbasename = args['--dbase']
         if not dbasename:
-            raise ValueError("dbase name must be provided if not precompute")
+            raise ValueError(wzs_i18n.t('py_dbase_required',
+                                        'dbase name must be provided if not precompute'))
         if cmd == "new" or cmd == "newmerge":
             # Check that the output directory can be created before we start
             ensure_dir(os.path.split(dbasename)[0])
@@ -448,12 +470,14 @@ def main(argv):
         else:
             # Load existing hash table file (add, match, merge)
             if args['--verbose']:
-                report([time.ctime() + " Reading hash table " + dbasename])
+                report([time.ctime() + " " + wzs_i18n.t('py_reading_table', 'Reading hash table {file}',
+                                                        file=dbasename)])
             hash_tab = hash_table.HashTable(dbasename)
             if analyzer and 'samplerate' in hash_tab.params \
                     and hash_tab.params['samplerate'] != analyzer.target_sr:
                 # analyzer.target_sr = hash_tab.params['samplerate']
-                print("db samplerate overridden to ", analyzer.target_sr)
+                print(wzs_i18n.t('py_samplerate_overridden', 'db samplerate overridden to  {rate}',
+                                 rate=analyzer.target_sr))
     else:
         # The command IS precompute
         # dummy empty hash table
@@ -490,10 +514,12 @@ def main(argv):
 
     elapsedtime = time_clock() - initticks
     if analyzer and analyzer.soundfiletotaldur > 0.:
-        print("Processed "
-              + "%d files (%.1f s total dur) in %.1f s sec = %.3f x RT" \
-              % (analyzer.soundfilecount, analyzer.soundfiletotaldur,
-                 elapsedtime, (elapsedtime / analyzer.soundfiletotaldur)))
+        print(wzs_i18n.t('py_processed',
+                         'Processed {files} files ({duration} s total dur) in {elapsed} s sec = {ratio} x RT',
+                         files='%d' % analyzer.soundfilecount,
+                         duration='%.1f' % analyzer.soundfiletotaldur,
+                         elapsed='%.1f' % elapsedtime,
+                         ratio='%.3f' % (elapsedtime / analyzer.soundfiletotaldur)))
 
     # Save the hash table file if it has been modified
     if hash_tab and hash_tab.dirty:

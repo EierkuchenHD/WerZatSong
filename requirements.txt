@@ -3,5 +3,7 @@ joblib
 numpy
 psutil
 scipy
-# Optional: loads Audfprint database files about three times faster (used automatically when installed)
+# Optional: loads Audfprint database files about three times faster (used automatically when installed). Remove the # from before "isal" to install it.
 # isal
+audioop-lts; python_version >= '3.13'
+shazamio

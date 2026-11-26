@@ -1,4 +1,5 @@
 const { cyan, gray, greenBright, redBright, yellow } = require('chalk')
+const { t } = require('./i18n')
 
 const Message = {
     EMPTY: gray,
@@ -9,24 +10,24 @@ const Message = {
 }
 
 function empty(message){
-    console.log(Message.EMPTY(`[EMPTY]: ${message}`))
+    console.log(Message.EMPTY(`[${t('tag_empty')}]: ${message}`))
 }
 
 function exit(message){
-    console.error(Message.ERROR(`[ERROR]: ${message}`))
+    console.error(Message.ERROR(`[${t('tag_error')}]: ${message}`))
     process.exit(1)
 }
 
 function info(message){
-    console.log(Message.INFO(`[INFO]: ${message}`))
+    console.log(Message.INFO(`[${t('tag_info')}]: ${message}`))
 }
 
 function success(message){
-    console.log(Message.SUCCESS(`[SUCCESS]: ${message}`))
+    console.log(Message.SUCCESS(`[${t('tag_success')}]: ${message}`))
 }
 
 function warning(message){
-    console.log(Message.WARNING(`[WARNING]: ${message}`))
+    console.log(Message.WARNING(`[${t('tag_warning')}]: ${message}`))
 }
 
 module.exports = { empty, exit, info, success, warning }

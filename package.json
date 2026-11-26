@@ -1,5 +1,10 @@
 {
     "private": true,
+    "scripts": {
+        "credits:build": "node scripts/credits.js build",
+        "credits:update": "node scripts/credits.js update",
+        "credits:report": "node scripts/credits.js report"
+    },
     "dependencies": {
         "chalk": "^4.1.2",
         "dotenv": "^16.4.5",

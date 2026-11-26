@@ -29,6 +29,11 @@ import numpy as np
 # For wavread fallback.
 import scipy.io.wavfile as wav
 
+# LOCAL ADDITION: messages in WerZatSong's language, see wzs_i18n.py
+try:
+    import wzs_i18n
+except ImportError:
+    from . import wzs_i18n
 
 try:
     import queue
@@ -63,8 +68,9 @@ def audio_read(filename, sr=None, channels=None):
             # Convert stereo to mono.
             data = np.mean(data, axis=-1)
         if sr and sr != samplerate:
-            raise ValueError("Wav file has samplerate %f but %f requested." % (
-                samplerate, sr))
+            raise ValueError(wzs_i18n.t('py_wav_samplerate',
+                                        'Wav file has samplerate {rate} but {requested} requested.',
+                                        rate='%f' % samplerate, requested='%f' % sr))
         return data, samplerate
 
 
@@ -192,7 +198,7 @@ class FFmpegAudioFile(object):
 
     def __init__(self, filename, channels=None, sample_rate=None, block_size=4096):
         if not os.path.isfile(filename):
-            raise ValueError(filename + " not found.")
+            raise ValueError(wzs_i18n.t('py_audio_not_found', '{file} not found.', file=filename))
         popen_args = ['ffmpeg', '-i', filename, '-f', 's16le']
         self.channels = channels
         self.sample_rate = sample_rate
@@ -215,7 +221,8 @@ class FFmpegAudioFile(object):
         try:
             self._get_info()
         except ValueError:
-            raise ValueError("Error reading header info from " + filename)
+            raise ValueError(wzs_i18n.t('py_header_info', 'Error reading header info from {file}',
+                                        file=filename))
 
         # Start a separate thread to read the rest of the data from
         # stderr. This (a) avoids filling up the OS buffer and (b)
@@ -245,9 +252,8 @@ class FFmpegAudioFile(object):
                     if end_time - start_time >= timeout:
                         # Nothing interesting has happened for a while --
                         # FFmpeg is probably hanging.
-                        raise ValueError('ffmpeg output: {}'.format(
-                                ''.join(self.stderr_reader.queue.queue)
-                        ))
+                        raise ValueError(wzs_i18n.t('py_ffmpeg_output', 'ffmpeg output: {output}',
+                                                    output=''.join(self.stderr_reader.queue.queue)))
                     else:
                         start_time = end_time
                         # Keep waiting.
@@ -262,7 +268,7 @@ class FFmpegAudioFile(object):
             line = self.proc.stderr.readline()
             if not line:
                 # EOF and data not found.
-                raise ValueError("stream info not found")
+                raise ValueError(wzs_i18n.t('py_stream_info', 'stream info not found'))
 
             # In Python 3, result of reading from stderr is bytes.
             if isinstance(line, bytes):
@@ -271,7 +277,7 @@ class FFmpegAudioFile(object):
             line = line.strip().lower()
 
             if 'no such file' in line:
-                raise IOError('file not found')
+                raise IOError(wzs_i18n.t('py_file_not_found', 'file not found'))
             elif 'invalid data found' in line:
                 if not 'mjpeg' in line:
                     raise ValueError()

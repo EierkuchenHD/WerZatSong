@@ -1,0 +1,71 @@
+# Keeps resources/credits/pklz-credits.tsv up to date with the Lostwave
+# Fingerprints sheet, so everyone who downloads or updates WerZatSong gets
+# the newest credits without running update-credits themselves.
+#
+# Once an hour it downloads the sheet and runs npm run credits:build, which
+# adds new rows and edits and never takes anything out: a row deleted from
+# the sheet stays in the file. A commit is only made when something changed.
+#
+# If the sheet cannot be downloaded (Google down, the sheet deleted or no
+# longer shared), nothing changes and the run ends with a warning.
+# If the sheet suddenly names someone else for a lot of sources at once, as
+# a damaged or vandalized sheet would, nothing changes and the run fails.
+# When those changes are right, run this workflow by hand from the Actions
+# tab with "force" ticked.
+name: Update credits
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Apply the sheet even if it names someone else for a lot of sources at once
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-credits
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - run: npm install --no-audit --no-fund
+
+      - name: Read the sheet
+        env:
+          FORCE: ${{ inputs.force && '--force' || '' }}
+        run: |
+          set +e
+          node scripts/credits.js build $FORCE
+          status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::The Lostwave Fingerprints sheet could not be downloaded. The credits stay as they are."
+            exit 0
+          fi
+          exit $status
+
+      - name: Commit the new credits
+        run: |
+          if git diff --quiet -- resources/credits/pklz-credits.tsv; then
+            echo "The credits did not change."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add resources/credits/pklz-credits.tsv
+          git commit -m "Update the credits from the Lostwave Fingerprints sheet"
+          git push || (git pull --rebase && git push)

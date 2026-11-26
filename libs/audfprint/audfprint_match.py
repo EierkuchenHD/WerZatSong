@@ -25,6 +25,8 @@ except:
 import audfprint_analyze
 import audio_read
 import stft
+# LOCAL ADDITION: messages in WerZatSong's language, see wzs_i18n.py
+import wzs_i18n
 
 
 def process_info():
@@ -484,9 +486,9 @@ class Matcher(object):
                 numberstring = "#%d" % number
             else:
                 numberstring = ""
-            print(time.ctime(), "Analyzed", numberstring, filename, "of",
-                  ('%.3f' % durd), "s "
-                                   "to", len(q_hashes), "hashes")
+            print(time.ctime(), wzs_i18n.t('py_analyzed', 'Analyzed {number} {file} of {seconds} s to {count} hashes',
+                                           number=numberstring, file=filename,
+                                           seconds='%.3f' % durd, count=len(q_hashes)))
         # Run query
         rslts = self.match_hashes(ht, q_hashes)
         # Post filtering

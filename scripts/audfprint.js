@@ -60,6 +60,7 @@ const { hideBin } = require('yargs/helpers')
 const yargs = require('yargs/yargs')
 const { readObjectLines, writeObjectLines } = require('../utils/bigjson')
 const consts = require('../utils/consts')
+const { t } = require('../utils/i18n')
 
 dotenv.config()
 
@@ -158,7 +159,7 @@ function startMatcher(){
         ], { windowsHide: true })
     }
     catch(error){
-        gone(`cannot start python: ${error.message}`)
+        gone(t('python_cannot_start', { error: error.message }))
         return state
     }
     const child = state.child
@@ -175,14 +176,14 @@ function startMatcher(){
         state.pending = null
         pending.resolve(reply.ok === true
             ? { ok: true, verified: reply.verified === true && Number.isSafeInteger(reply.size) && /^\d+$/.test(String(reply.mtime_ns)) ? [reply.size, String(reply.mtime_ns)] : null }
-            : { ok: false, error: reply.error || 'unknown error' })
+            : { ok: false, error: reply.error || t('unknown_error') })
     })
     child.stderr.on('data', chunk => {
         state.stderrTail = (state.stderrTail + chunk.toString()).slice(-STDERR_TAIL_BYTES)
     })
     child.stdin.on('error', () => { /* python is gone; 'close' reports it */ })
-    child.on('error', error => gone(`cannot start python: ${error.message}`))
-    child.on('close', code => gone(`python exited (code ${code})`))
+    child.on('error', error => gone(t('python_cannot_start', { error: error.message })))
+    child.on('close', code => gone(t('python_exited', { code })))
     return state
 }
 
@@ -194,7 +195,7 @@ function matchFingerprint({ fingerprint, matchFile, trusted }, next){
         // written fails this shard here. The matcher appends the shard's
         // output to it.
         try { closeSync(openSync(matchFile, 'a')) }
-        catch(error){ return resolve({ ok: false, error: `cannot write match output: ${error.message}` }) }
+        catch(error){ return resolve({ ok: false, error: t('match_output_unwritable', { error: error.message }) }) }
         if(matcher && matcher.served >= SHARDS_PER_MATCHER){
             matcher.child.stdin.end() // end of input: that python exits
             matcher = null
@@ -213,10 +214,10 @@ function matchFingerprint({ fingerprint, matchFile, trusted }, next){
             if(matcher === state)
                 matcher = null
             state.gone = true
-            state.reason = 'stopped after a timeout'
+            state.reason = t('matcher_stopped_timeout')
             try { state.child.kill() }
             catch { /* already gone */ }
-            resolve({ ok: false, error: `no result after ${Math.round(SHARD_TIMEOUT_MS / 60000)} min, its matcher was stopped` })
+            resolve({ ok: false, error: t('matcher_timeout', { minutes: Math.round(SHARD_TIMEOUT_MS / 60000) }) })
         }, SHARD_TIMEOUT_MS)
         state.pending = { fingerprint, resolve: result => { clearTimeout(timer); resolve(result) } }
         state.served += 1
@@ -249,7 +250,9 @@ function runWorker(){
  * Primary side
  * ------------------------------------------------------------------------ */
 
-async function readMatches(resultsFile, basenameFingerprint, into){
+// fingerprint: the database file's path, kept with each match (pklz_path) so
+// werzatsong.js can look up who made it.
+async function readMatches(resultsFile, basenameFingerprint, into, fingerprint){
     if(!existsSync(resultsFile))
         return
     let unreadable = 0
@@ -263,13 +266,14 @@ async function readMatches(resultsFile, basenameFingerprint, into){
         const uniqueKey = `${parsed.input_file}:${parsed.matched_file}:${basenameFingerprint}`
         const existing = into[uniqueKey]
         if(!existing)
-            into[uniqueKey] = { ...parsed, counter: 1 }
+            into[uniqueKey] = { ...parsed, counter: 1, pklz_path: fingerprint }
         else {
             if(parsed.common_hashes > existing.common_hashes){
                 existing.common_hashes = parsed.common_hashes
                 existing.total_hashes = parsed.total_hashes
                 existing.match_time = parsed.match_time
                 existing.rank_position = parsed.rank_position
+                existing.pklz_path = fingerprint
             }
             existing.counter += 1
         }
@@ -278,7 +282,7 @@ async function readMatches(resultsFile, basenameFingerprint, into){
     catch { /* already gone; nothing to fold in twice */ }
     if(unreadable > 0)
         // stderr, so the orchestrator shows it as a warning: matches were lost
-        console.error(`${unreadable} unreadable result line(s) from ${basenameFingerprint} were skipped`)
+        console.error(t('worker_unreadable_lines', { count: unreadable, file: basenameFingerprint }))
 }
 
 function sleepSync(ms){
@@ -321,11 +325,11 @@ function readCheckpoint(path){
         const results = {}
         const checkpoint = readObjectLines(path, (key, value) => { results[key] = value }, { entriesKey: 'results' })
         if(checkpoint.version !== CHECKPOINT_VERSION || !Array.isArray(checkpoint.done))
-            throw new Error('not a checkpoint this version writes')
+            throw new Error(t('checkpoint_wrong_version'))
         return { ...checkpoint, results }
     }
     catch(error){
-        console.error(`Cannot resume from ${path}: ${error.message}`)
+        console.error(t('resume_from_failed', { file: path, error: error.message }))
         process.exit(1)
     }
 }
@@ -374,7 +378,7 @@ function runPrimary(){
             writeAtomically(VERIFIED_FILE, JSON.stringify({ version: VERIFIED_VERSION, files: verified }))
             verifiedDirty = false
         }
-        catch(error){ console.error(`Could not save the list of verified database files: ${error.message}`) }
+        catch(error){ console.error(t('verified_list_save_failed', { error: error.message })) }
     }
     const matchFiles = new Map(tasks.map(task => [task.fingerprint, task.matchFile]))
     const total = fingerprints.length
@@ -416,7 +420,7 @@ function runPrimary(){
     // matching stage.)
     const saveProgress = () => {
         try { writeResults() }
-        catch(error){ console.error(`Could not save the results so far, trying again later: ${error.message}`) }
+        catch(error){ console.error(t('results_save_retry', { error: error.message })) }
     }
 
     // Folding results in is serialised: each shard's file is read completely and
@@ -425,15 +429,15 @@ function runPrimary(){
     const fold = (fingerprint, error) => {
         const basenameFingerprint = basename(fingerprint)
         foldChain = foldChain
-            .then(() => readMatches(matchFiles.get(fingerprint), basenameFingerprint, results))
+            .then(() => readMatches(matchFiles.get(fingerprint), basenameFingerprint, results, fingerprint))
             .then(() => {
                 done.push({ fingerprint, error: error || null })
                 dirty = true
             })
             .catch(readError => {
                 // Part of its rows may be in: it must not be searched again on resume.
-                const reason = `its results could not be read: ${readError.message}`
-                console.error(`Could not read the results of ${basenameFingerprint}: ${readError.message}`)
+                const reason = t('shard_results_unreadable_reason', { error: readError.message })
+                console.error(t('shard_results_unreadable', { file: basenameFingerprint, error: readError.message }))
                 done.push({ fingerprint, error: error || reason })
                 if(!error)
                     failures.push({ fingerprint, error: reason })
@@ -460,7 +464,7 @@ function runPrimary(){
                 saved = true
             }
             catch(error){
-                console.error(`Could not save the results (attempt ${attempt} of 5): ${error.message}`)
+                console.error(t('results_save_attempt', { attempt, attempts: 5, error: error.message }))
                 if(attempt < 5)
                     await new Promise(resolve => setTimeout(resolve, 3000))
             }
@@ -469,12 +473,12 @@ function runPrimary(){
         // reported, and an older one still resumes correctly: worth a try, not
         // worth failing the run over.
         try { saveCheckpoint() }
-        catch(error){ console.error(`Could not update the checkpoint: ${error.message}`) }
+        catch(error){ console.error(t('checkpoint_update_failed', { error: error.message })) }
         saveVerified()
         if(failures.length > 0){
             try { writeAtomically(FAILED_FILE, failures.map(({ fingerprint, error }) => `${fingerprint}\t${error}`).join('\n') + '\n') }
-            catch(error){ console.error(`Could not write the list of unsearched files: ${error.message}`) }
-            console.error(`${failures.length} of ${wholeSearch} database file(s) could not be searched; listed in ${FAILED_FILE}`)
+            catch(error){ console.error(t('unsearched_list_failed', { error: error.message })) }
+            console.error(t('unsearched_summary', { count: failures.length, total: wholeSearch, file: FAILED_FILE }))
         }
         for(const worker of Object.values(cluster.workers))
             worker.kill()
@@ -484,7 +488,7 @@ function runPrimary(){
     const recordFailure = (fingerprint, error) => {
         failures.push({ fingerprint, error })
         // stderr, so the orchestrator surfaces it as a warning line
-        console.error(`(${finished}/${total}) Analysis FAILED for: ${basename(fingerprint)} - ${error}`)
+        console.error(t('analysis_failed', { completed: finished, total, file: basename(fingerprint), error }))
     }
 
     if(total === 0){
@@ -508,13 +512,13 @@ function runPrimary(){
                 return
             finished += 1
             const basenameFingerprint = basename(message.fingerprint)
-            const error = message.ok ? null : (message.error || 'unknown error')
+            const error = message.ok ? null : (message.error || t('unknown_error'))
             if(message.ok && Array.isArray(message.verified) && !VERIFY_ALWAYS){
                 verified[message.fingerprint] = [message.verified[0], message.verified[1], Date.now()]
                 verifiedDirty = true
             }
             if(message.ok)
-                console.log(`(${finished}/${total}) Analysis completed for: ${basenameFingerprint}`)
+                console.log(t('analysis_completed', { completed: finished, total, file: basenameFingerprint }))
             else
                 recordFailure(message.fingerprint, error)
             // Fold even a failed shard: whatever it printed before failing is still valid.
@@ -525,7 +529,7 @@ function runPrimary(){
         worker.on('exit', (code, signal) => {
             if(exiting || remaining.size === 0)
                 return
-            const reason = `worker exited unexpectedly (${signal || `code ${code}`})`
+            const reason = t('worker_exited_unexpectedly', { how: signal || t('worker_exit_code_how', { code }) })
             for(const fingerprint of remaining){
                 finished += 1
                 recordFailure(fingerprint, reason)

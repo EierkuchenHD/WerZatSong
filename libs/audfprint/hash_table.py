@@ -20,6 +20,12 @@ import zlib
 import numpy as np
 import scipy.io
 
+# LOCAL ADDITION: messages in WerZatSong's language, see wzs_i18n.py
+try:
+    import wzs_i18n
+except ImportError:
+    from . import wzs_i18n
+
 if sys.version_info[0] >= 3:
     # Python 3 specific definitions
     import pickle  # Py3
@@ -67,7 +73,8 @@ def _bitsfor(maxval):
         Raises a ValueError if the maxval is not a power of 2. """
     maxvalbits = int(round(math.log(maxval) / math.log(2)))
     if maxval != (1 << maxvalbits):
-        raise ValueError("maxval must be a power of 2, not %d" % maxval)
+        raise ValueError(wzs_i18n.t('py_maxval_power_of_two', 'maxval must be a power of 2, not {value}',
+                                    value='%d' % maxval))
     return maxvalbits
 
 
@@ -83,9 +90,10 @@ def _load_pklz_pickle(file_object, buffers=None):
                 return HashTable
             if (module, name) in _PKLZ_ALLOWED_GLOBALS:
                 return super().find_class(module, name)
-            raise pickle.UnpicklingError(
-                'refusing to load %s.%s from a database file: not part of an '
-                'audfprint hash table' % (module, name))
+            raise pickle.UnpicklingError(wzs_i18n.t(
+                'py_refusing_to_load',
+                'refusing to load {name} from a database file: not part of an audfprint hash table',
+                name='%s.%s' % (module, name)))
 
     if buffers is not None:
         return _PklzUnpickler(file_object, buffers=buffers,
@@ -442,6 +450,12 @@ def _read_pklz(name, trusted, memory, preloaded=None, fast=None):
     return temp, warning
 
 
+def _trailer_warning():
+    """ What a gzip member cut off before its trailer is reported as. """
+    return wzs_i18n.t('py_trailer_incomplete',
+                      'gzip trailer incomplete, checksum not verified')
+
+
 class _CheckedGzipReader(io.RawIOBase):
     """ Raw stream of the decompressed contents of gzip file object
         <fileobj>, inflated directly into the buffer readinto() is given.
@@ -485,8 +499,7 @@ class _CheckedGzipReader(io.RawIOBase):
                     # As when zlib waits for the rest of a trailer.
                     self._early_end = (EOFError, 'Compressed file ended before '
                                        'the end-of-stream marker was reached')
-                    self._warning = ('gzip trailer incomplete, checksum not '
-                                     'verified')
+                    self._warning = _trailer_warning()
                     return False
                 if (self._fast is not None
                         and int.from_bytes(rest[:4], 'little') != self._crc):
@@ -521,8 +534,10 @@ class _CheckedGzipReader(io.RawIOBase):
             start = self._fileobj.tell() - len(self._input)
             ignored = self._fileobj.seek(0, io.SEEK_END) - start
             self._early_end = (gzip.BadGzipFile, message)
-            self._warning = ('%d unexpected bytes after the compressed data, '
-                             'ignored' % ignored)
+            self._warning = wzs_i18n.t(
+                'py_unexpected_bytes',
+                '{count} unexpected bytes after the compressed data, ignored',
+                count='%d' % ignored)
             return False
         if self._verify and self._fast is None:
             # 16 + MAX_WBITS: a gzip member, whose CRC32 and length zlib
@@ -541,8 +556,7 @@ class _CheckedGzipReader(io.RawIOBase):
                 self._input = b''
                 self._early_end = (EOFError, 'Compressed file ended before '
                                    'the end-of-stream marker was reached')
-                self._warning = ('gzip trailer incomplete, checksum not '
-                                 'verified')
+                self._warning = _trailer_warning()
                 return False
             self._input += more
         if self._fast is not None and self._input[3] & ~8:
@@ -582,8 +596,7 @@ class _CheckedGzipReader(io.RawIOBase):
                 self._finished = True
                 self._early_end = (EOFError, 'Compressed file ended before '
                                    'the end-of-stream marker was reached')
-                self._warning = ('gzip trailer incomplete, checksum not '
-                                 'verified')
+                self._warning = _trailer_warning()
         return filled
 
     def readinto(self, buffer):
@@ -828,9 +841,16 @@ class HashTable(object):
         nhashes = sum(self.counts)
         # Report the proportion of dropped hashes (overfull table)
         dropped = nhashes - sum(np.minimum(self.depth, self.counts))
-        print("Saved fprints for", sum(n is not None for n in self.names),
-              "files (", nhashes, "hashes) to", name,
-              "(%.2f%% dropped)" % (100.0 * dropped / max(1, nhashes)))
+        dropped_pct = 100.0 * dropped / max(1, nhashes)
+        files = sum(n is not None for n in self.names)
+        print(wzs_i18n.t('py_saved_fprints',
+                         'Saved fprints for {files} files ( {hashes} hashes) to {name} ({dropped}% dropped)',
+                         files=files, hashes=nhashes, name=name,
+                         dropped='%.2f' % dropped_pct))
+        # LOCAL MODIFICATION: werzatsong.js --merge reads the dropped share
+        # from this line, not from the wording above.
+        wzs_i18n.emit('saved', files=int(files), hashes=int(nhashes),
+                      dropped=float('%.2f' % dropped_pct), name=name)
 
     def load(self, name, trusted=None, preloaded=None):
         """ Read either pklz or mat-format hash table file """
@@ -845,9 +865,11 @@ class HashTable(object):
         # Report the proportion of dropped hashes (overfull table)
         dropped = nhashes - np.sum(np.minimum(self.depth, self.counts),
                                    dtype=np.int64)
-        print("Read fprints for", sum(n is not None for n in self.names),
-              "files (", nhashes, "hashes) from", name,
-              "(%.2f%% dropped)" % (100.0 * dropped / max(1, nhashes)))
+        print(wzs_i18n.t('py_read_fprints',
+                         'Read fprints for {files} files ( {hashes} hashes) from {name} ({dropped}% dropped)',
+                         files=sum(n is not None for n in self.names),
+                         hashes=nhashes, name=name,
+                         dropped='%.2f' % (100.0 * dropped / max(1, nhashes))))
 
     def load_pkl(self, name, file_object=None, trusted=None, preloaded=None):
         """ Read hash table values from pickle file <name>. """
@@ -875,11 +897,13 @@ class HashTable(object):
                     name, None if fast is not None else trusted, None,
                     preloaded)
             if warning:
-                print('warning: %s: %s' % (name, warning), file=sys.stderr)
+                print(wzs_i18n.t('py_load_warning', 'warning: {name}: {warning}',
+                                 name=name, warning=warning), file=sys.stderr)
         if temp.ht_version < HT_OLD_COMPAT_VERSION:
-            raise ValueError('Version of ' + name + ' is ' + str(temp.ht_version)
-                             + ' which is not at least ' +
-                             str(HT_OLD_COMPAT_VERSION))
+            raise ValueError(wzs_i18n.t('py_version_too_old',
+                                        'Version of {name} is {version} which is not at least {minimum}',
+                                        name=name, version=temp.ht_version,
+                                        minimum=HT_OLD_COMPAT_VERSION))
         # assert temp.ht_version >= HT_COMPAT_VERSION
         params = temp.params
         self.hashbits = temp.hashbits
@@ -890,8 +914,8 @@ class HashTable(object):
             self.maxtimebits = _bitsfor(temp.maxtime)
         if temp.ht_version < HT_COMPAT_VERSION:
             # Need to upgrade the database.
-            print("Loading database version", temp.ht_version,
-                  "in compatibility mode.")
+            print(wzs_i18n.t('py_compat_mode', 'Loading database version {version} in compatibility mode.',
+                             version=temp.ht_version))
             # Offset all the nonzero bins with one ID count.
             temp.table += np.array(1 << self.maxtimebits).astype(np.uint32) * (
                     temp.table != 0)
@@ -987,7 +1011,7 @@ class HashTable(object):
             # lookup name or assign new
             if name not in self.names:
                 if not add_if_missing:
-                    raise ValueError("name " + name + " not found")
+                    raise ValueError(wzs_i18n.t('py_name_not_found', 'name {name} not found', name=name))
                 # Use an empty slot in the list if one exists.
                 try:
                     id_ = self.names.index(None)
@@ -1020,7 +1044,8 @@ class HashTable(object):
         self.names[id_] = None
         self.hashesperid[id_] = 0
         self.dirty = True
-        print("Removed", name, "(", hashes_removed, "hashes).")
+        print(wzs_i18n.t('py_removed', 'Removed {name} ( {count} hashes).',
+                         name=name, count=hashes_removed))
 
     def retrieve(self, name):
         """Return an np.array of (time, hash) pairs found in the table."""

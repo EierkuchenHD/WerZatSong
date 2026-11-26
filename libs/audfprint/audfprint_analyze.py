@@ -25,6 +25,8 @@ import audio_read
 # For utility, glob2hashtable
 import hash_table
 import stft
+# LOCAL ADDITION: messages in WerZatSong's language, see wzs_i18n.py
+import wzs_i18n
 
 # ############### Globals ############### #
 # Special extension indicating precomputed fingerprint
@@ -287,7 +289,7 @@ class Analyzer(object):
         else:
             # The sgram is identically zero, i.e., the input signal was identically
             # zero.  Not good, but let's let it through for now.
-            print("find_peaks: Warning: input signal is identically zero.")
+            print(wzs_i18n.t('py_signal_zero', 'find_peaks: Warning: input signal is identically zero.'))
         # High-pass filter onset emphasis
         # [:-1,] discards top bin (nyquist) of sgram so bins fit in 8 bits
         sgram = np.array([scipy.signal.lfilter([1, -1],
@@ -357,11 +359,12 @@ class Analyzer(object):
                 # [d, sr] = librosa.load(filename, sr=self.target_sr)
                 d, sr = audio_read.audio_read(filename, sr=self.target_sr, channels=1)
             except Exception as e:  # audioread.NoBackendError:
-                message = "wavfile2peaks: Error reading " + filename
+                message = wzs_i18n.t('py_error_reading', 'wavfile2peaks: Error reading {file}',
+                                     file=filename)
                 if self.fail_on_error:
                     print(e)
                     raise IOError(message)
-                print(message, "skipping")
+                print(message, wzs_i18n.t('py_skipping', 'skipping'))
                 d = []
                 sr = self.target_sr
             # Store duration in a global because it's hard to handle
@@ -481,8 +484,8 @@ def hashes_load(hashfilename):
     with open(hashfilename, 'rb') as f:
         magic = f.read(len(HASH_MAGIC))
         if magic != HASH_MAGIC:
-            raise IOError('%s is not a hash file (magic %s)'
-                          % (hashfilename, magic))
+            raise IOError(wzs_i18n.t('py_not_hash_file', '{file} is not a hash file (magic {magic})',
+                                     file=hashfilename, magic=magic))
         data = f.read(fmtsize)
         while data is not None and len(data) == fmtsize:
             hashes.append(struct.unpack(HASH_FMT, data))
@@ -505,8 +508,8 @@ def peaks_load(peakfilename):
     with open(peakfilename, 'rb') as f:
         magic = f.read(len(PEAK_MAGIC))
         if magic != PEAK_MAGIC:
-            raise IOError('%s is not a peak file (magic %s)'
-                          % (peakfilename, magic))
+            raise IOError(wzs_i18n.t('py_not_peak_file', '{file} is not a peak file (magic {magic})',
+                                     file=peakfilename, magic=magic))
         data = f.read(fmtsize)
         while data is not None and len(data) == fmtsize:
             peaks.append(struct.unpack(PEAK_FMT, data))

@@ -21,6 +21,7 @@ const crypto = require('node:crypto')
 const { readFileSync } = require('node:fs')
 const { join } = require('node:path')
 const { promisify } = require('node:util')
+const { t } = require('./i18n')
 
 const execFileP = promisify(execFile)
 
@@ -95,17 +96,17 @@ async function checkToolchain(commands, needs){
 
     const running = parseVersion(process.version)
     if(!running || !atLeast(running, MIN_NODE))
-        result.problems.push(`node ${process.version} runs werzatsong.js, but ${showVersion(MIN_NODE)} or newer is needed`)
+        result.problems.push(t('tool_node_too_old', { version: process.version, minimum: showVersion(MIN_NODE) }))
 
     try {
         const version = firstLine(await run(commands.node, ['--version']))
         result.workerNode = version
         const parsed = parseVersion(version)
         if(!parsed || !atLeast(parsed, MIN_NODE))
-            report(needs.workerNode, `NODE_COMMAND is node ${version || '(unknown version)'}, but ${showVersion(MIN_NODE)} or newer is needed`)
+            report(needs.workerNode, t('tool_worker_node_too_old', { version: version || t('tool_unknown_version'), minimum: showVersion(MIN_NODE) }))
     }
     catch(error){
-        report(needs.workerNode, `NODE_COMMAND (${commands.node.exe}) cannot be run: ${error.message.split('\n')[0]}`)
+        report(needs.workerNode, t('tool_worker_node_cannot_run', { command: commands.node.exe, error: error.message.split('\n')[0] }))
     }
 
     if(needs.python || needs.pythonModules || needs.decoder){
@@ -115,14 +116,16 @@ async function checkToolchain(commands, needs){
             result.decoder = info.decoder
             const parsed = parseVersion(info.version)
             if(!parsed || !atLeast(parsed, MIN_PYTHON))
-                report(needs.python, `PYTHON_COMMAND is Python ${info.version}, but ${showVersion(MIN_PYTHON)} or newer is needed`)
+                report(needs.python, t('tool_python_too_old', { version: info.version, minimum: showVersion(MIN_PYTHON) }))
             if(info.missing.length > 0)
-                report(needs.pythonModules, `Python (${info.executable}) cannot import ${info.missing.join(', ')} - install with: python -m pip install -r requirements.txt`)
+                report(needs.pythonModules, t('tool_python_missing_modules', { executable: info.executable, modules: info.missing.join(', ') }))
             if(!info.decoder.version)
-                report(needs.decoder, `audfprint decodes audio with the "ffmpeg" Python finds, and there is none that runs${info.decoder.path ? ` (${info.decoder.path}: ${info.decoder.error})` : ' on its PATH'}`)
+                report(needs.decoder, info.decoder.path
+                    ? t('tool_decoder_cannot_run', { path: info.decoder.path, error: info.decoder.error })
+                    : t('tool_decoder_missing'))
         }
         catch(error){
-            report(needs.python || needs.pythonModules, `PYTHON_COMMAND (${commands.python.exe}) cannot be run: ${error.message.split('\n')[0]}`)
+            report(needs.python || needs.pythonModules, t('tool_python_cannot_run', { command: commands.python.exe, error: error.message.split('\n')[0] }))
         }
     }
 
@@ -131,10 +134,10 @@ async function checkToolchain(commands, needs){
             result.trimmer = firstLine(await run(commands.ffmpeg, ['-version']))
         }
         catch(error){
-            result.problems.push(`--trim needs FFMPEG_COMMAND (${commands.ffmpeg.exe}), which cannot be run: ${error.message.split('\n')[0]}`)
+            result.problems.push(t('tool_trimmer_cannot_run', { command: commands.ffmpeg.exe, error: error.message.split('\n')[0] }))
         }
         if(result.trimmer && result.decoder?.version && result.trimmer !== result.decoder.version)
-            result.notes.push(`--trim uses a different ffmpeg (${result.trimmer}) than audfprint's decoder (${result.decoder.version})`)
+            result.notes.push(t('tool_trimmer_differs', { trimmer: result.trimmer, decoder: result.decoder.version }))
     }
     return result
 }
@@ -142,15 +145,15 @@ async function checkToolchain(commands, needs){
 function describeToolchain(result){
     const parts = [`node ${result.node}`]
     if(result.workerNode && result.workerNode !== result.node)
-        parts.push(`worker node ${result.workerNode}`)
+        parts.push(`${t('tool_label_worker_node')} ${result.workerNode}`)
     if(result.python){
         const modules = ['numpy', 'scipy'].filter(name => result.python.modules[name]).map(name => `${name} ${result.python.modules[name]}`)
         parts.push(`python ${result.python.version}${modules.length ? ` (${modules.join(', ')})` : ''}`)
     }
     if(result.decoder?.version)
-        parts.push(`decoder ${result.decoder.version.replace(/ Copyright.*$/, '')}${result.decoder.path ? ` [${result.decoder.path}]` : ''}`)
+        parts.push(`${t('tool_label_decoder')} ${result.decoder.version.replace(/ Copyright.*$/, '')}${result.decoder.path ? ` [${result.decoder.path}]` : ''}`)
     if(result.trimmer)
-        parts.push(`trimmer ${result.trimmer.replace(/ Copyright.*$/, '')}`)
+        parts.push(`${t('tool_label_trimmer')} ${result.trimmer.replace(/ Copyright.*$/, '')}`)
     return parts.join(' | ')
 }
 

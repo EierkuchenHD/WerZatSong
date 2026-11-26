@@ -11,5 +11,6 @@ temp/
 
 # Files
 .env
+credits-overrides.tsv
 package-lock.json
 werzatsong.lock
